@@ -100,8 +100,8 @@ void formats(ImlibLoader *l)
  *
  * So on a little endian architecture, the required byte layout is B G R A.
  *
- * By default, imlib2 will pass @c im->data to @c free() when it has finished with the pixels.
- * You can prevent that by setting the @c F_HAVE_ALPHA flag.
+ * By default, imlib2 will pass @c im->data to <tt>free()</tt> when it has finished with the pixels.
+ * You can prevent that by setting the @c F_DONT_FREE_DATA flag.
  *
  * @param[in] im->real_file The name of the file we should open and read.
  * @param[in] im->file ??? (use @c real_file instead.)
