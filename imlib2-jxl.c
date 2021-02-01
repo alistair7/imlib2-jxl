@@ -81,9 +81,11 @@ void formats(ImlibLoader *l)
         l->formats = NULL;
     }
 
+    static const char jxl[] = "jxl";
     l->num_formats = 1;
     l->formats = malloc(sizeof(char*));
-    l->formats[0] = strdup("jxl");
+    l->formats[0] = malloc(sizeof(jxl));
+    memcpy(l->formats[0], jxl, sizeof(jxl));
 }
 
 /**
