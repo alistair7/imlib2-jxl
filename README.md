@@ -1,9 +1,8 @@
 ## JPEG XL Image Loader for imlib2 ##
-This is a loader for imlib2 that adds support for reading [JPEG XL](https://jpeg.org/jpegxl/index.html) files.  This lets you view them using [feh](https://feh.finalrewind.org/), for example.  It relies on [libjxl](https://gitlab.com/wg1/jpeg-xl) for decoding the images.  libjxl is under heavy development, so breaking API changes are likely.
+This is a loader for imlib2 that adds support for reading and writing [JPEG XL](https://jpeg.org/jpegxl/index.html) files.  This lets you view them using [feh](https://feh.finalrewind.org/), for example.  It relies on [libjxl](https://gitlab.com/wg1/jpeg-xl) for decoding the images.  libjxl is under heavy development, so breaking API changes are likely.
 
 All JPEG XL files are supported, with the following limitations:
-* Writing is unsupported.  (Possible future development)
-* All inputs are internally converted to ARGB with 8 bits per sample - this is a limitation of imlib2.
+* All images are internally converted to ARGB with 8 bits per sample - this is a limitation of imlib2.
 * Embedded colorspaces are ignored - everything is treated as sRGB - this is a limitation of imlib2(?).  (Possible future development: convert pixels to sRGB if we detect a different colorspace in the input.)
 * For animated JXLs, only the first frame is decoded.
 
