@@ -24,7 +24,7 @@ make
 This should produce jxl.so.
 
 ### Install ###
-You need to install jxl.so to a location where imlib2 can find it.  On 64-bit Kubuntu this is /usr/lib/x86_64-linux-gnu/imlib2/loaders.  On Arch this is /usr/lib/imlib2/loaders.  `sudo make install` executes install.sh, which makes a very feeble attempt to find the right directory and copy the library there.  If that fails, you'll have to copy it to the right location yourself.
+You need to install jxl.so to a location where imlib2 can find it.  On 64-bit Kubuntu this is /usr/lib/x86_64-linux-gnu/imlib2/loaders.  On Arch this is /usr/lib/imlib2/loaders.  `sudo make install` attempts to find the right location via pkg-config and copy the library there.  If that fails, you'll have to copy it to the right location yourself.
 
 #### feh ####
 As of version 3.6, feh verifies each file's magic bytes before passing it to imlib2 ([#505](https://github.com/derf/feh/issues/505)).  JXL files aren't recognised, so you will get an error similar to

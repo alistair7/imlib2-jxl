@@ -48,6 +48,16 @@ do { \
 #endif
 
 
+/* Debugging bumf */
+#define WARN_PRINTF(...) myprintf(stderr, __FILE__, __func__, __LINE__, __VA_ARGS__)
+#ifdef IMLIB2JXL_DEBUG
+#define DEBUG_PRINTF(...) myprintf(stderr, __FILE__, __func__, __LINE__, __VA_ARGS__)
+#else
+#define DEBUG_PRINTF(...)
+#endif
+
+
+
 /**
  * Print a formatted message to a file.
  */
@@ -74,11 +84,13 @@ static void myprintf(FILE *to, const char *file, const char *func, unsigned line
  */
 void formats(ImlibLoader *l)
 {
+    DEBUG_PRINTF("");
+
     // imlib2 just defines DATA32 as an unsigned int, which isn't necessarily 32 bits.  So add a check just in case...
     // Note the optimizer removes this code entirely if the condition is false.
     if(sizeof(DATA32) != sizeof(uint32_t))
     {
-        myprintf(stderr, __FILE__, __func__, __LINE__, "Loader relies on unsigned ints being 4 bytes long, but they're %zu B long.", sizeof(DATA32));
+        WARN_PRINTF("Loader relies on unsigned ints being 4 bytes long, but they're %zu B long.", sizeof(DATA32));
         l->num_formats = 0;
         l->formats = NULL;
     }
@@ -135,7 +147,7 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
     (void)progress_granularity;
 #endif
 
-    //myprintf(stderr, __FILE__, __func__, __LINE__, "%s : immediate_load[%d]", im->real_file, (int)immediate_load);
+    DEBUG_PRINTF("Read [%s] immediate_load[%d]", im->real_file, (int)immediate_load);
 
     char retval = 0;
     JxlDecoder *dec = NULL;
@@ -200,6 +212,8 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
             if((res = JxlDecoderGetBasicInfo(dec, &basic_info)) != JXL_DEC_SUCCESS)
                 RETURN_ERR("Failed in JxlDecoderGetBasicInfo");
 
+            DEBUG_PRINTF("%ux%u RGB%s", basic_info.xsize, basic_info.ysize, basic_info.alpha_bits>0 ? "A" : "");
+
             if(!IMAGE_DIMENSIONS_OK(basic_info.xsize, basic_info.ysize))
                 RETURN_ERR("Dimensions %ux%u are not supported by imlib2", basic_info.xsize, basic_info.ysize);
 
@@ -207,7 +221,7 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
             im->h = basic_info.ysize;
 
             if(basic_info.alpha_bits > 0)
-                SET_FLAG(im->flags, F_HAS_ALPHA); // Should this be set anyway since we always return ARGB?
+                SET_FLAG(im->flags, F_HAS_ALPHA);
 
             // If imlib2 only wants the metadata, return now
             if (!immediate_load)
@@ -256,6 +270,7 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
 
     // Data from libjxl is byte-ordered RGBA, so now have to swap the channels around for imlib2.
 
+    // Swap channels in place
     if(IS_BIG_ENDIAN())
     {
         // Convert RGBA to ARGB
@@ -357,8 +372,17 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
 
     JxlPixelFormat pixel_format = { .align = 0, .data_type = JXL_TYPE_UINT8, .num_channels = 4, .endianness = JXL_NATIVE_ENDIAN};
 
-    if(JxlEncoderSetDimensions(enc, im->w, im->h) != JXL_ENC_SUCCESS)
-        RETURN_ERR("Invalid dimensions %d x %d", im->w, im->h);
+    JxlBasicInfo basic_info = {.alpha_bits = 8,
+                               .bits_per_sample = 8,
+                               .num_color_channels = 3,
+                               .num_extra_channels = 1,
+                               .orientation = JXL_ORIENT_IDENTITY,
+                               .xsize = im->w,
+                               .ysize = im->h,
+                              };
+
+    if(JxlEncoderSetBasicInfo(enc, &basic_info) != JXL_ENC_SUCCESS)
+        RETURN_ERR("Failed to set encoder parameters with dimensions %d x %d", im->w, im->h);
 
     // Check for specific quality/compression parameters
     ImlibImageTag *tag;

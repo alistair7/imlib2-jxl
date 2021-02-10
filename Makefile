@@ -11,7 +11,7 @@ imlib2-jxl.o: imlib2-jxl.c
 	$(CC) -c $(CFLAGS) -o$@ $<
 
 install:
-	./install.sh
+	install -m 644 jxl.so `pkg-config imlib2 --variable=libdir`/imlib2/loaders/
 
 clean:
 	$(RM) imlib2-jxl.o
