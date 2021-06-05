@@ -2,8 +2,7 @@
 This is a loader for imlib2 that adds support for reading and writing [JPEG XL](https://jpeg.org/jpegxl/index.html) files.  This lets you view them using [feh](https://feh.finalrewind.org/), for example.  It relies on [libjxl](https://gitlab.com/wg1/jpeg-xl) for decoding the images.  libjxl is under heavy development, so breaking API changes are likely.
 
 All JPEG XL files are supported, with the following limitations:
-* All images are internally converted to ARGB with 8 bits per sample - this is a limitation of imlib2.
-* Embedded colorspaces are ignored - everything is treated as sRGB - this is a limitation of imlib2(?).  (Possible future development: convert pixels to sRGB if we detect a different colorspace in the input.)
+* All images are internally converted to ARGB with 8 bits per sample, in an sRGB colorspace - this is a limitation of imlib2.
 * For animated JXLs, only the first frame is decoded.
 
 
@@ -14,6 +13,7 @@ The loader has been built and tested on Linux (Kubuntu x86_64, Arch x86_64) usin
 * make.
 * [imlib2](https://docs.enlightenment.org/api/imlib2/html/) with development headers (libimlib2-dev for Debian and similar).
 * [libjxl](https://gitlab.com/wg1/jpeg-xl) with development headers.
+* [liblcms2](https://github.com/mm2/Little-CMS) with development headers (liblcms2-dev for Debian and similar).
 
 Once those are installed...
 ```
@@ -32,6 +32,15 @@ As of version 3.6, feh verifies each file's magic bytes before passing it to iml
 feh WARNING: asdf.jxl - Does not look like an image (magic bytes missing)
 ```
 To skip this check, set `FEH_SKIP_MAGIC=1` in feh's environment, and it will start working.
+
+### Debug Build ###
+Use the `debug` target of the makefile to produce an unoptimized build that includes debugging symbols and prints information to stdout while it runs.
+The resulting library will be called jxl-dbg.so.  Use `install-debug` to copy this to imlib2's loader directory.
+```
+make debug
+sudo make install-debug
+```
+You can have the release and debug builds installed at the same time, but imlib2 will only use the first one it finds.
 
 ### Copying ###
 The two header files were taken from [gawen947/imlib2-webp](https://github.com/gawen947/imlib2-webp) and are distributed according to their embedded license.  Everything else was written by me and is available under the [BSD-3-Clause License](https://github.com/alistair7/imlib2-jxl/blob/main/LICENSE).

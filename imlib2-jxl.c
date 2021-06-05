@@ -16,6 +16,10 @@
 #include <jxl/encode.h>
 #include <jxl/thread_parallel_runner.h>
 
+#ifdef IMLIB2JXL_USE_LCMS
+#include <lcms2.h>
+#endif
+
 #include "loader.h"
 
 /**
@@ -71,6 +75,8 @@ static void myprintf(FILE *to, const char *file, const char *func, unsigned line
     fputc('\n', to);
 }
 
+
+
 /**
  * @brief Function called by imlib2 to ask your loader what formats it supports.
  *
@@ -95,12 +101,152 @@ void formats(ImlibLoader *l)
         l->formats = NULL;
     }
 
+#ifdef IMLIB2JXL_USE_LCMS
+    if(LCMS_VERSION != cmsGetEncodedCMMversion())
+        WARN_PRINTF("Warning: jxl loader was compiled against a different version of liblcms!");
+#endif
+
     static const char jxl[] = "jxl";
     l->num_formats = 1;
     l->formats = malloc(sizeof(char*));
     l->formats[0] = malloc(sizeof(jxl));
     memcpy(l->formats[0], jxl, sizeof(jxl));
 }
+
+
+
+
+#ifdef IMLIB2JXL_USE_LCMS
+
+
+#ifdef IMLIB2JXL_DEBUG
+/**
+ * @brief Get readable description of ICC profile.
+ *
+ * The caller is responsible for freeing the returned pointer.
+ */
+static char *get_icc_description(cmsHPROFILE icc)
+{
+    char *retval = NULL;
+
+    static const char def_lang[] = "en";
+    static const char def_country[] = "US";
+    const char *lang = def_lang;
+    const char *country = def_country;
+    char lang_env[20];
+
+    {
+        char *lang_test = getenv("LANG");
+        if(lang_test)
+        {
+            snprintf(lang_env, sizeof(lang_env), "%s", lang_test);
+            char *lang_end = strchr(lang_env, '_');
+            if(lang_end)
+            {
+                *lang_end = '\0';
+                char *country_end = strchr(lang_end+1, '.');
+                if(country_end)
+                {
+                    *country_end = '\0';
+                    lang = lang_env;
+                    country = lang_end + 1;
+                    DEBUG_PRINTF("Got lang \"%s\", country \"%s\" from environment", lang, country);
+                }
+            }
+        }
+    }
+
+    const cmsInfoType infoType = cmsInfoDescription;
+
+    cmsUInt32Number required = cmsGetProfileInfoASCII(icc, infoType, lang, country, NULL, 0);
+    if(!(retval = malloc(required)))
+        RETURN_ERR("Failed to allocate %u B for ICC description", (unsigned)required);
+
+    cmsGetProfileInfoASCII(icc, infoType, lang, country, retval, required);
+
+ret:
+    return retval;
+}
+#endif // IMLIB2JXL_DEBUG
+
+
+/**
+ * @brief Convert pixels to sRGB from whatever colorspace they're currently using.
+ *
+ * @param[in] input_icc_blob Pointer to ICC profile blob representing the current colorspace.
+ * @param[in] icc_blob_size Number of bytes in the profile referenced by @p input_icc_blob.
+ * @param[in] px_in Pointer to current pixel data.  Expected to be 32 bits per pixel byte-ordered RGBA (TYPE_RGBA_8 in LCMS).
+ * @param[out] px_out Pointer to a buffer where the transformed pixel data will be written.
+ * @param[in] num_pixels Number of pixels to transform.  Both @p px_in and @p px_out should
+ *            be at least 4 * @p num_pixels long.
+ * @param[in] preserve_alpha If true, the alpha values are copied to the output (LCMS loses this data by default.)
+ */
+static int convert_to_srgb(uint8_t *input_icc_blob, size_t icc_blob_size, const uint8_t *px_in, uint8_t *px_out, size_t num_pixels, bool preserve_alpha)
+{
+    int retval = -1;
+    cmsHPROFILE source_icc = NULL;
+    cmsHPROFILE srgb_icc = NULL;
+    cmsHTRANSFORM trans = NULL;
+
+    if(!(source_icc = cmsOpenProfileFromMem(input_icc_blob, icc_blob_size)))
+        RETURN_ERR("Failed to create color profile from %zu B ICC data", icc_blob_size);
+
+    if(!(srgb_icc = cmsCreate_sRGBProfile()))
+        RETURN_ERR("Failed to create sRGB color profile");
+
+#ifdef IMLIB2JXL_DEBUG
+    char *from = get_icc_description(source_icc);
+    char *to = get_icc_description(srgb_icc);
+    DEBUG_PRINTF("Converting color space [%s] -> [%s]", from, to);
+    free(from);
+    free(to);
+#endif
+
+    // To avoid shuffling the channels again later, set the output format to the required TYPE_ARGB_8
+
+    if(!(trans = cmsCreateTransform(source_icc, TYPE_RGBA_8, srgb_icc, IS_BIG_ENDIAN() ? TYPE_ARGB_8 : TYPE_BGRA_8, INTENT_PERCEPTUAL, 0)))
+    {
+#ifdef IMLIB2JXL_DEBUG
+        char *from = get_icc_description(source_icc);
+        char *to = get_icc_description(srgb_icc);
+        DEBUG_PRINTF("Failed to create color transformation [%s] -> [%s]", from, to);
+        free(from);
+        free(to);
+#endif
+        goto ret;
+    }
+
+    cmsDoTransform(trans, px_in, px_out, num_pixels);
+
+    if(preserve_alpha)
+    {
+        if(IS_BIG_ENDIAN())
+        {
+            for(size_t i=0; i<num_pixels; i++)
+                px_out[4*i] = px_in[4*i + 3];
+        }
+        else
+        {
+            for(size_t i=0; i<num_pixels; i++)
+                px_out[4*i + 3] = px_in[4*i + 3];
+        }
+    }
+
+    retval = 0;
+
+ret:
+    if(trans)
+        cmsDeleteTransform(trans);
+    if(srgb_icc)
+        cmsCloseProfile(srgb_icc);
+    if(source_icc)
+        cmsCloseProfile(source_icc);
+
+    return retval;
+}
+
+#endif // IMLIB2JXL_USE_LCMS
+
 
 /**
  * @brief Function called by imlib2 when it wants your loader to decode an image file.
@@ -157,6 +303,15 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
     uint8_t *pixels = NULL;
     size_t pixels_size;
 
+#ifdef IMLIB2JXL_USE_LCMS
+    uint8_t *icc_blob = NULL;
+    size_t icc_size = 0;
+    const int events = JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE | JXL_DEC_COLOR_ENCODING;
+#else
+    const int events = JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE;
+#endif
+
+
     // Initialize decoder
     if(im->data)
         RETURN_ERR("ImlibImage data field is not NULL");
@@ -170,7 +325,7 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
     if(JxlDecoderSetParallelRunner(dec, JxlThreadParallelRunner, runner) != JXL_DEC_SUCCESS)
         RETURN_ERR("Failed in JxlDecoderSetParallelRunner");
 
-    if(JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS)
+    if(JxlDecoderSubscribeEvents(dec, events) != JXL_DEC_SUCCESS)
         RETURN_ERR("Failed in JxlDecoderSubscribeEvents");
 
     if(!(in = fopen(im->real_file, "rb")))
@@ -234,6 +389,40 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
                 progress(im, 1, 0, 0, basic_info.xsize, basic_info.ysize); // 1% done!
             break;
 
+#ifdef IMLIB2JXL_USE_LCMS
+        case JXL_DEC_COLOR_ENCODING:
+        {
+            DEBUG_PRINTF("Got color encoding");
+            /* If libjxl claims the decoded pixels will be sRGB, don't bother converting anything.
+             * If there's no JPEG-XL-encoded profile, or it's something other than sRGB, try to
+             * extract an ICC profile and save it for later. */
+
+            JxlColorEncoding color_enc;
+            if(JxlDecoderGetColorAsEncodedProfile(dec, &pixel_format, JXL_COLOR_PROFILE_TARGET_DATA, &color_enc) == JXL_DEC_SUCCESS)
+            {
+                if(color_enc.color_space == JXL_COLOR_SPACE_RGB && color_enc.transfer_function == JXL_TRANSFER_FUNCTION_SRGB)
+                {
+                    // Is this check sufficient?  Does the white point matter?
+                    DEBUG_PRINTF("Color space is sRGB");
+                    break;
+                }
+            }
+
+            if(JxlDecoderGetICCProfileSize(dec, &pixel_format, JXL_COLOR_PROFILE_TARGET_DATA, &icc_size) != JXL_DEC_SUCCESS)
+            {
+                icc_size = 0;
+                break;
+            }
+            if(!(icc_blob = malloc(icc_size)))
+                RETURN_ERR("Failed to allocate %zu B for ICC profile", icc_size);
+
+            if(JxlDecoderGetColorAsICCProfile(dec, &pixel_format, JXL_COLOR_PROFILE_TARGET_DATA, icc_blob, icc_size) != JXL_DEC_SUCCESS)
+                icc_size = 0;
+
+            break;
+        }
+#endif // IMLIB2JXL_USE_LCMS
+
         case JXL_DEC_NEED_IMAGE_OUT_BUFFER:
             // Time to allocate some space for the pixels
             if (JxlDecoderImageOutBufferSize(dec, &pixel_format, &pixels_size) != JXL_DEC_SUCCESS )
@@ -268,32 +457,61 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
 
     }
 
-    // Data from libjxl is byte-ordered RGBA, so now have to swap the channels around for imlib2.
+    // Data from libjxl is byte-ordered RGBA, so now have to swap the channels around for imlib2
+    // ...but if we're doing a color space transformation, we can swap channels at the same time, so
+    // there's no need to do two passes.
 
-    // Swap channels in place
-    if(IS_BIG_ENDIAN())
+#ifdef IMLIB2JXL_USE_LCMS
+    bool color_converted = false;
+
+    if(icc_size > 0)
     {
-        // Convert RGBA to ARGB
-        for(uint8_t *px = pixels; px < pixels+pixels_size; px += 4)
+        uint8_t *srgb_pixels = malloc(pixels_size);
+        if(convert_to_srgb(icc_blob, icc_size, pixels, srgb_pixels, basic_info.xsize*basic_info.ysize, basic_info.alpha_bits > 0))
         {
-            uint8_t tmp[4];
-            memcpy(tmp, px, 4);
-            px[0] = tmp[3];
-            px[1] = tmp[0];
-            px[2] = tmp[1];
-            px[3] = tmp[2];
+            // Failed
+            free(srgb_pixels);
+        }
+        else
+        {
+            free(pixels);
+            pixels = srgb_pixels;
+            color_converted = true;
         }
     }
-    else
+
+    if(!color_converted)
     {
-        // Convert RGBA to BGRA
-        for(uint8_t *px = pixels; px < pixels+pixels_size; px += 4)
-        {
-            uint8_t tmp = px[0];
-            px[0] = px[2];
-            px[2] = tmp;
-        }
+#endif
+
+      // Swap channels in place
+      if(IS_BIG_ENDIAN())
+      {
+          // Convert RGBA to ARGB
+          for(uint8_t *px = pixels; px < pixels+pixels_size; px += 4)
+          {
+              uint8_t tmp[4];
+              memcpy(tmp, px, 4);
+              px[0] = tmp[3];
+              px[1] = tmp[0];
+              px[2] = tmp[1];
+              px[3] = tmp[2];
+          }
+      }
+      else
+      {
+          // Convert RGBA to BGRA
+          for(uint8_t *px = pixels; px < pixels+pixels_size; px += 4)
+          {
+              uint8_t tmp = px[0];
+              px[0] = px[2];
+              px[2] = tmp;
+          }
+      }
+
+#ifdef IMLIB2JXL_USE_LCMS
     }
+#endif
 
     im->data = (DATA32*)pixels;
 
@@ -303,6 +521,10 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
     retval = 1;
 
 ret:
+#ifdef IMLIB2JXL_USE_LCMS
+    free(icc_blob);
+#endif
+
     if(retval == 0)
     {
        free(pixels);
