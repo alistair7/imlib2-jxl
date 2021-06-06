@@ -124,6 +124,8 @@ void formats(ImlibLoader *l)
  * @brief Get readable description of ICC profile.
  *
  * The caller is responsible for freeing the returned pointer.
+ *
+ * @return Pointer to allocated string, or @c NULL on failure.
  */
 static char *get_icc_description(cmsHPROFILE icc)
 {
@@ -133,12 +135,12 @@ static char *get_icc_description(cmsHPROFILE icc)
     static const char def_country[] = "US";
     const char *lang = def_lang;
     const char *country = def_country;
-    char lang_env[20];
 
     {
         char *lang_test = getenv("LANG");
         if(lang_test)
         {
+            char lang_env[20];
             snprintf(lang_env, sizeof(lang_env), "%s", lang_test);
             char *lang_end = strchr(lang_env, '_');
             if(lang_end)
@@ -180,6 +182,8 @@ ret:
  * @param[in] num_pixels Number of pixels to transform.  Both @p px_in and @p px_out should
  *            be at least 4 * @p num_pixels long.
  * @param[in] preserve_alpha If true, the alpha values are copied to the output (LCMS loses this data by default.)
+ *
+ * @return 0 on success.
  */
 static int convert_to_srgb(uint8_t *input_icc_blob, size_t icc_blob_size, const uint8_t *px_in, uint8_t *px_out, size_t num_pixels, bool preserve_alpha)
 {
@@ -467,10 +471,14 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
     if(icc_size > 0)
     {
         uint8_t *srgb_pixels = malloc(pixels_size);
+        if(!srgb_pixels)
+            RETURN_ERR("Failed to allocate %zu B for sRGB pixels", pixels_size);
+
         if(convert_to_srgb(icc_blob, icc_size, pixels, srgb_pixels, basic_info.xsize*basic_info.ysize, basic_info.alpha_bits > 0))
         {
             // Failed
             free(srgb_pixels);
+            WARN_PRINTF("Color space transformation failed, but continuing anyway");
         }
         else
         {
