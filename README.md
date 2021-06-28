@@ -1,5 +1,5 @@
 ## JPEG XL Image Loader for imlib2 ##
-This is a loader for imlib2 that adds support for reading and writing [JPEG XL](https://jpeg.org/jpegxl/index.html) files.  This lets you view them using [feh](https://feh.finalrewind.org/), for example.  It relies on [libjxl](https://gitlab.com/wg1/jpeg-xl) for encoding and decoding the images.
+This is a loader for imlib2 that adds support for reading and writing [JPEG XL](https://jpeg.org/jpegxl/index.html) files.  This lets you view them using [feh](https://feh.finalrewind.org/), for example.  It relies on [libjxl](https://github.com/libjxl/libjxl) for encoding and decoding the images.
 
 All JPEG XL files are supported, with the following limitations:
 * All images are internally converted to ARGB with 8 bits per sample, in an sRGB colorspace - this is a limitation of imlib2.
@@ -12,7 +12,7 @@ The loader has been built and tested on Linux (Kubuntu x86_64, Arch x86_64) usin
 #### Build Dependencies ####
 * make.
 * [imlib2](https://docs.enlightenment.org/api/imlib2/html/) with development headers (libimlib2-dev for Debian and similar).
-* [libjxl](https://gitlab.com/wg1/jpeg-xl) with development headers.
+* [libjxl](https://github.com/libjxl/libjxl) with development headers.
 * [liblcms2](https://github.com/mm2/Little-CMS) with development headers (liblcms2-dev for Debian and similar).
 
 Once those are installed...
@@ -33,8 +33,10 @@ feh WARNING: asdf.jxl - Does not look like an image (magic bytes missing)
 ```
 To skip this check, set `FEH_SKIP_MAGIC=1` in feh's environment, and it will start working.
 
+This workaround is no longer necessary in the latest git version of feh, which recognises JXL's signature.
+
 ### Debug Build ###
-Use the `debug` target of the makefile to produce an unoptimized build that includes debugging symbols and prints information to stdout while it runs.
+Use the `debug` target of the makefile to produce an unoptimized build that includes debugging symbols and prints information to stderr while it runs.
 The resulting library will be called jxl-dbg.so.  Use `install-debug` to copy this to imlib2's loader directory.
 ```
 make debug
