@@ -45,7 +45,9 @@ sudo make install-debug
 You can have the release and debug builds installed at the same time, but imlib2 will only use the first one it finds.
 
 ### Copying ###
-The two header files were taken from [gawen947/imlib2-webp](https://github.com/gawen947/imlib2-webp) and are distributed according to their embedded license.  Everything else was written by me and is available under the [BSD-3-Clause License](https://github.com/alistair7/imlib2-jxl/blob/main/LICENSE).
+All source code in this repository is available under the [BSD-3-Clause License](https://github.com/alistair7/imlib2-jxl/blob/main/LICENSE-BSD-ab), © Alistair Barrow, with the following exceptions:
+* [imlib2_common.h](https://github.com/alistair7/imlib2-jxl/blob/main/imlib2_common.h), [loader.h](https://github.com/alistair7/imlib2-jxl/blob/main/loader.h): available under the [BSD-3-Clause License](https://github.com/alistair7/imlib2-jxl/blob/main/LICENSE-BSD-dh), © David Hauweele.
+* [PKGBUILD](https://github.com/alistair7/imlib2-jxl/blob/main/PKGBUILD): available under [GPL3](https://github.com/alistair7/imlib2-jxl/blob/main/LICENSE-GPL3).
 
 ### Rant ###
 Writing a loader for imlib2 is harder than it should be.
