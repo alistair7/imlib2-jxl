@@ -602,17 +602,21 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
 
     JxlPixelFormat pixel_format = { .align = 0, .data_type = JXL_TYPE_UINT8, .num_channels = 4, .endianness = JXL_NATIVE_ENDIAN};
 
-    JxlBasicInfo basic_info = {.alpha_bits = 8,
-                               .bits_per_sample = 8,
-                               .num_color_channels = 3,
-                               .num_extra_channels = 1,
-                               .orientation = JXL_ORIENT_IDENTITY,
-                               .xsize = im->w,
-                               .ysize = im->h,
-                              };
+    JxlBasicInfo basic_info;
+    JxlEncoderInitBasicInfo(&basic_info);
+    basic_info.alpha_bits = 8;
+    basic_info.num_extra_channels = 1;
+    basic_info.xsize = im->w;
+    basic_info.ysize = im->h;
+    basic_info.uses_original_profile = JXL_TRUE;
 
     if(JxlEncoderSetBasicInfo(enc, &basic_info) != JXL_ENC_SUCCESS)
         RETURN_ERR("Failed to set encoder parameters with dimensions %d x %d", im->w, im->h);
+
+    JxlColorEncoding color;
+    JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
+    if(JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS)
+        RETURN_ERR("Failed in JXLEncoderSetColorEncoding");
 
     // Check for specific quality/compression parameters
     ImlibImageTag *tag;
