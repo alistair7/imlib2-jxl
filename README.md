@@ -2,7 +2,7 @@
 This is a loader for imlib2 that adds support for reading and writing [JPEG XL](https://jpeg.org/jpegxl/index.html) files.  This lets you view them using [feh](https://feh.finalrewind.org/), for example.  It relies on [libjxl](https://github.com/libjxl/libjxl) for encoding and decoding the images.
 
 All JPEG XL files are supported, with the following limitations:
-* All images are internally converted to ARGB with 8 bits per sample, in an sRGB colorspace - this is a limitation of imlib2.
+* All images are internally converted to ARGB with 8 bits per sample, and transformed to an sRGB colorspace - this is a limitation of imlib2.
 * For animated JXLs, only the first frame is decoded.
 
 
@@ -27,13 +27,13 @@ This should produce jxl.so.
 You need to install jxl.so to a location where imlib2 can find it.  On 64-bit Kubuntu this is /usr/lib/x86_64-linux-gnu/imlib2/loaders.  On Arch this is /usr/lib/imlib2/loaders.  `sudo make install` attempts to find the right location via pkg-config and copy the library there.  If that fails, you'll have to copy it to the right location yourself.
 
 #### feh ####
-As of version 3.6, feh verifies each file's magic bytes before passing it to imlib2 ([#505](https://github.com/derf/feh/issues/505)).  JXL files aren't recognised, so you will get an error similar to
+If you are using a version of feh between 3.6 and 3.7.0, inclusive, JXL files will not be recognised (due to [#505](https://github.com/derf/feh/issues/505)), and you will get an error similar to
 ```
 feh WARNING: asdf.jxl - Does not look like an image (magic bytes missing)
 ```
-To skip this check, set `FEH_SKIP_MAGIC=1` in feh's environment, and it will start working.
+To avoid this, set `FEH_SKIP_MAGIC=1` in feh's environment, and it will start working.
 
-This workaround is no longer necessary in the latest git version of feh, which recognises JXL's signature.
+This workaround is no longer necessary since feh version 3.7.1, which recognises JXL's signature.
 
 ### Debug Build ###
 Use the `debug` target of the makefile to produce an unoptimized build that includes debugging symbols and prints information to stderr while it runs.
@@ -45,9 +45,8 @@ sudo make install-debug
 You can have the release and debug builds installed at the same time, but imlib2 will only use the first one it finds.
 
 ### Copying ###
-All source code in this repository is available under the [BSD-3-Clause License](https://github.com/alistair7/imlib2-jxl/blob/main/LICENSE-BSD-ab), © Alistair Barrow, with the following exceptions:
+All source code in this repository is available under the [BSD-3-Clause License](https://github.com/alistair7/imlib2-jxl/blob/main/LICENSE-BSD-ab), © Alistair Barrow, with the following exception:
 * [imlib2_common.h](https://github.com/alistair7/imlib2-jxl/blob/main/imlib2_common.h), [loader.h](https://github.com/alistair7/imlib2-jxl/blob/main/loader.h): available under the [BSD-3-Clause License](https://github.com/alistair7/imlib2-jxl/blob/main/LICENSE-BSD-dh), © David Hauweele.
-* [PKGBUILD](https://github.com/alistair7/imlib2-jxl/blob/main/PKGBUILD): available under [GPL3](https://github.com/alistair7/imlib2-jxl/blob/main/LICENSE-GPL3).
 
 ### Rant ###
 Writing a loader for imlib2 is harder than it should be.
