@@ -61,6 +61,10 @@ do { \
 #endif
 
 
+#ifdef __GNUC__
+static void myprintf(FILE *to, const char *file, const char *func, unsigned line, const char *format, ...)
+__attribute__(( format(printf,5,6) ));
+#endif
 
 /**
  * Print a formatted message to a file.
@@ -90,7 +94,7 @@ static void myprintf(FILE *to, const char *file, const char *func, unsigned line
  */
 void formats(ImlibLoader *l)
 {
-    DEBUG_PRINTF("");
+    DEBUG_PRINTF("imblib2-jxl");
 
     // imlib2 just defines DATA32 as an unsigned int, which isn't necessarily 32 bits.  So add a check just in case...
     // Note the optimizer removes this code entirely if the condition is false.
@@ -130,11 +134,8 @@ void formats(ImlibLoader *l)
 static char *get_icc_description(cmsHPROFILE icc)
 {
     char *retval = NULL;
-
-    static const char def_lang[] = "en";
-    static const char def_country[] = "US";
-    const char *lang = def_lang;
-    const char *country = def_country;
+    const char *lang = "en";
+    const char *country = "US";
 
     {
         char *lang_test = getenv("LANG");
@@ -178,7 +179,7 @@ ret:
  * @param[in] input_icc_blob Pointer to ICC profile blob representing the current colorspace.
  * @param[in] icc_blob_size Number of bytes in the profile referenced by @p input_icc_blob.
  * @param[in] px_in Pointer to current pixel data.  Expected to be 32 bits per pixel byte-ordered RGBA (TYPE_RGBA_8 in LCMS).
- * @param[out] px_out Pointer to a buffer where the transformed pixel data will be written.
+ * @param[out] px_out Pointer to a buffer where the transformed pixel data will be written - 32-bit word-ordered ARGB.
  * @param[in] num_pixels Number of pixels to transform.  Both @p px_in and @p px_out should
  *            be at least 4 * @p num_pixels long.
  * @param[in] preserve_alpha If true, the alpha values are copied to the output (LCMS loses this data by default.)
@@ -191,6 +192,10 @@ static int convert_to_srgb(uint8_t *input_icc_blob, size_t icc_blob_size, const 
     cmsHPROFILE source_icc = NULL;
     cmsHPROFILE srgb_icc = NULL;
     cmsHTRANSFORM trans = NULL;
+#ifdef IMLIB2JXL_DEBUG
+    char *src_icc_name = NULL;
+    char *dst_icc_name = NULL;
+#endif
 
     if(!(source_icc = cmsOpenProfileFromMem(input_icc_blob, icc_blob_size)))
         RETURN_ERR("Failed to create color profile from %zu B ICC data", icc_blob_size);
@@ -199,11 +204,11 @@ static int convert_to_srgb(uint8_t *input_icc_blob, size_t icc_blob_size, const 
         RETURN_ERR("Failed to create sRGB color profile");
 
 #ifdef IMLIB2JXL_DEBUG
-    char *from = get_icc_description(source_icc);
-    char *to = get_icc_description(srgb_icc);
-    DEBUG_PRINTF("Converting color space [%s] -> [%s]", from, to);
-    free(from);
-    free(to);
+    if((src_icc_name = get_icc_description(source_icc)) &&
+       (dst_icc_name = get_icc_description(srgb_icc)))
+    {
+        DEBUG_PRINTF("Converting color space [%s] -> [%s]", src_icc_name, dst_icc_name);
+    }
 #endif
 
     // To avoid shuffling the channels again later, set the output format to the required TYPE_ARGB_8
@@ -245,7 +250,10 @@ ret:
         cmsCloseProfile(srgb_icc);
     if(source_icc)
         cmsCloseProfile(source_icc);
-
+#ifdef IMLIB2JXL_DEBUG
+    free(src_icc_name);
+    free(dst_icc_name);
+#endif
     return retval;
 }
 
@@ -626,41 +634,40 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
         // Other loaders seem to assume that quality is in the range [0-99] (?)
         const int max_quality = 99;
 
-        int quality = tag->val;
-        if(quality < 0)
-            quality = 0;
-        else if(quality > max_quality)
-            quality = max_quality;
-
-        // Transform quality 0-99 to distance 15-0
-        if(JxlEncoderOptionsSetDistance(opts, 15 - (quality * 15/(float)max_quality)) != JXL_ENC_SUCCESS)
-            RETURN_ERR("Failed in JxlEncoderOptionsSetDistance: %.1f", 15 - (quality * 15/(float)max_quality));
+        int quality = (tag->val < 0) ? 0 :
+                      (tag->val > max_quality) ? max_quality :
+                       tag->val;
 
         // If quality is maxed out, explicity enable lossless mode
         if(quality == max_quality)
         {
             if(JxlEncoderOptionsSetLossless(opts, 1) != JXL_ENC_SUCCESS)
                 RETURN_ERR("Failed in JxlEncoderOptionsSetLossless");
+            DEBUG_PRINTF("Lossless encoding");
         }
-
+        else
+        {
+            // Transform quality 0-99 to distance 15-0
+            float distance = 15 - (quality * 15/(float)max_quality);
+            if(JxlEncoderOptionsSetDistance(opts, distance) != JXL_ENC_SUCCESS)
+                RETURN_ERR("Failed in JxlEncoderOptionsSetDistance: %.1f", distance);
+            DEBUG_PRINTF("Butteraugli distance = %.1f", distance);
+        }
     }
 
     if((tag = __imlib_GetTag(im, "compression")))
     {
         // Other loaders seem to assume that compression is in the range [0-9] (?)
-        const int max_compression = 9;
+        // libjxl works with [1-9]
 
-        int compression = tag->val;
-        if(compression < 0)
-            compression = 0;
-        else if(compression > max_compression)
-            compression = max_compression;
+        int compression = (tag->val < 1) ? 1 :
+                          (tag->val > 9) ? 9 :
+                           tag->val;
 
-        // Transform compression 0-9 to effort 3-9
-        compression = 3 + (int)roundf(compression * 6/(float)max_compression);
+        if(JxlEncoderOptionsSetInteger(opts, JXL_ENC_OPTION_EFFORT, compression) != JXL_ENC_SUCCESS)
+            RETURN_ERR("Failed in JxlEncoderOptionsSetInteger(JXL_ENC_OPTION_EFFORT, %d)", compression);
 
-        if(JxlEncoderOptionsSetEffort(opts, compression) != JXL_ENC_SUCCESS)
-            RETURN_ERR("Failed in JxlEncoderOptionsSetEffort: %d", compression);
+        DEBUG_PRINTF("Effort = %d", compression);
     }
 
     const size_t pixels_size = 4 * im->w * im->h;
