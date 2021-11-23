@@ -213,7 +213,8 @@ static int convert_to_srgb(uint8_t *input_icc_blob, size_t icc_blob_size, const 
 
     // To avoid shuffling the channels again later, set the output format to the required TYPE_ARGB_8
 
-    if(!(trans = cmsCreateTransform(source_icc, TYPE_RGBA_8, srgb_icc, IS_BIG_ENDIAN() ? TYPE_ARGB_8 : TYPE_BGRA_8, INTENT_PERCEPTUAL, 0)))
+
+    if(!(trans = cmsCreateTransform(source_icc, TYPE_RGBA_8, srgb_icc, IS_BIG_ENDIAN() ? TYPE_ARGB_8 : TYPE_BGRA_8, cmsGetHeaderRenderingIntent(source_icc), 0)))
     {
 #ifdef IMLIB2JXL_DEBUG
         char *from = get_icc_description(source_icc);
@@ -255,6 +256,25 @@ ret:
     free(dst_icc_name);
 #endif
     return retval;
+}
+
+
+/**
+ * Return true if vectors are "roughly" equal.
+ * i.e. no component differs by >= 2e-5.
+ * This threshold is completely arbitrary.
+ *
+ * @param[in] length Dimension of both vectors.
+ * @param[in] v1,v2 Arrays of length @p length to compare.
+ */
+static bool near_equal(unsigned length, const double *v1, const double *v2)
+{
+  for(unsigned i=0; i<length; ++i)
+  {
+      if(fabs(v1[i]-v2[i]) >= .00002)
+          return false;
+  }
+  return true;
 }
 
 #endif // IMLIB2JXL_USE_LCMS
@@ -313,7 +333,7 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
     FILE *in = NULL;
     char *file_data = NULL;
     uint8_t *pixels = NULL;
-    size_t pixels_size;
+    size_t pixels_size = 0;
 
 #ifdef IMLIB2JXL_USE_LCMS
     uint8_t *icc_blob = NULL;
@@ -404,18 +424,59 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
 #ifdef IMLIB2JXL_USE_LCMS
         case JXL_DEC_COLOR_ENCODING:
         {
-            DEBUG_PRINTF("Got color encoding");
+            if(basic_info.num_color_channels < 3)
+            {
+                /* Converting color profiles for grayscale input is currently broken, so skip for now. */
+                DEBUG_PRINTF("Ignored color encoding for grayscale image");
+                break;
+            }
+
             /* If libjxl claims the decoded pixels will be sRGB, don't bother converting anything.
              * If there's no JPEG-XL-encoded profile, or it's something other than sRGB, try to
              * extract an ICC profile and save it for later. */
 
+            /* Approximation of the color profile we're calling "sRGB",
+             * based on CIE Standard Illuminant (D65) and primaries (to 5dp),
+             * IEC 61966-2-1 sRGB transfer functions. */
+            static const double d65[] = {.3127, .3290};
+            static const double primaries_r[] = {.64, .33001};
+            static const double primaries_g[] = {.3,  .6};
+            static const double primaries_b[] = {.15, .06};
+            static const double gamma = .45455;
+
             JxlColorEncoding color_enc;
             if(JxlDecoderGetColorAsEncodedProfile(dec, &pixel_format, JXL_COLOR_PROFILE_TARGET_DATA, &color_enc) == JXL_DEC_SUCCESS)
             {
-                if(color_enc.color_space == JXL_COLOR_SPACE_RGB && color_enc.transfer_function == JXL_TRANSFER_FUNCTION_SRGB)
+
+                if(color_enc.color_space == JXL_COLOR_SPACE_RGB
+                   &&
+                   (
+                     /* Transfer function is IEC sRGB or near-as-damn-it power law */
+                     color_enc.transfer_function == JXL_TRANSFER_FUNCTION_SRGB ||
+                     ( color_enc.transfer_function == JXL_TRANSFER_FUNCTION_GAMMA && near_equal(1, &color_enc.gamma, &gamma) )
+                   )
+                   &&
+                   (
+                     /* Primaries are CIE sRGB or close enough */
+                     color_enc.primaries == JXL_PRIMARIES_SRGB ||
+                     (color_enc.primaries == JXL_PRIMARIES_CUSTOM &&
+                       near_equal(2, color_enc.primaries_red_xy, primaries_r) &&
+                       near_equal(2, color_enc.primaries_green_xy, primaries_g) &&
+                       near_equal(2, color_enc.primaries_blue_xy, primaries_b)
+                     )
+                   ) &&
+                   (
+                    /* White point is, or could pass for, D65 */
+                     color_enc.white_point == JXL_WHITE_POINT_D65 ||
+                    (color_enc.white_point == JXL_WHITE_POINT_CUSTOM && near_equal(2, color_enc.white_point_xy, d65))
+                   )
+                  )
                 {
-                    // Is this check sufficient?  Does the white point matter?
-                    DEBUG_PRINTF("Color space is sRGB");
+                    DEBUG_PRINTF("Encoded color profile is %s sRGB/D65",
+                                 color_enc.transfer_function == JXL_TRANSFER_FUNCTION_SRGB &&
+                                 color_enc.primaries == JXL_PRIMARIES_SRGB &&
+                                 color_enc.white_point == JXL_WHITE_POINT_D65
+                                 ? "exactly" : "nearly" );
                     break;
                 }
             }
@@ -425,12 +486,20 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
                 icc_size = 0;
                 break;
             }
+
             if(!(icc_blob = malloc(icc_size)))
                 RETURN_ERR("Failed to allocate %zu B for ICC profile", icc_size);
 
             if(JxlDecoderGetColorAsICCProfile(dec, &pixel_format, JXL_COLOR_PROFILE_TARGET_DATA, icc_blob, icc_size) != JXL_DEC_SUCCESS)
+            {
+                WARN_PRINTF("Failed to read ICC profile");
+                free(icc_blob);
+                icc_blob = NULL;
                 icc_size = 0;
+                break;
+            }
 
+            DEBUG_PRINTF("Got ICC color profile");
             break;
         }
 #endif // IMLIB2JXL_USE_LCMS
