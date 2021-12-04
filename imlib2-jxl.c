@@ -192,15 +192,19 @@ static int convert_to_srgb(uint8_t *input_icc_blob, size_t icc_blob_size, const 
     cmsHPROFILE source_icc = NULL;
     cmsHPROFILE srgb_icc = NULL;
     cmsHTRANSFORM trans = NULL;
+    cmsContext ctx = NULL;
 #ifdef IMLIB2JXL_DEBUG
     char *src_icc_name = NULL;
     char *dst_icc_name = NULL;
 #endif
 
-    if(!(source_icc = cmsOpenProfileFromMem(input_icc_blob, icc_blob_size)))
+    if(!(ctx = cmsCreateContext(NULL, NULL)))
+        RETURN_ERR("Failed to create lcms context");
+
+    if(!(source_icc = cmsOpenProfileFromMemTHR(ctx, input_icc_blob, icc_blob_size)))
         RETURN_ERR("Failed to create color profile from %zu B ICC data", icc_blob_size);
 
-    if(!(srgb_icc = cmsCreate_sRGBProfile()))
+    if(!(srgb_icc = cmsCreate_sRGBProfileTHR(ctx)))
         RETURN_ERR("Failed to create sRGB color profile");
 
 #ifdef IMLIB2JXL_DEBUG
@@ -214,7 +218,9 @@ static int convert_to_srgb(uint8_t *input_icc_blob, size_t icc_blob_size, const 
     // To avoid shuffling the channels again later, set the output format to the required TYPE_ARGB_8
 
 
-    if(!(trans = cmsCreateTransform(source_icc, TYPE_RGBA_8, srgb_icc, IS_BIG_ENDIAN() ? TYPE_ARGB_8 : TYPE_BGRA_8, cmsGetHeaderRenderingIntent(source_icc), 0)))
+    if(!(trans = cmsCreateTransformTHR(ctx, source_icc, TYPE_RGBA_8, srgb_icc,
+                                       IS_BIG_ENDIAN() ? TYPE_ARGB_8 : TYPE_BGRA_8,
+                                       cmsGetHeaderRenderingIntent(source_icc), 0)))
     {
 #ifdef IMLIB2JXL_DEBUG
         char *from = get_icc_description(source_icc);
@@ -251,6 +257,8 @@ ret:
         cmsCloseProfile(srgb_icc);
     if(source_icc)
         cmsCloseProfile(source_icc);
+    if(ctx)
+        cmsDeleteContext(ctx);
 #ifdef IMLIB2JXL_DEBUG
     free(src_icc_name);
     free(dst_icc_name);
@@ -673,9 +681,9 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
     if(JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner) != JXL_ENC_SUCCESS)
         RETURN_ERR("Failed in JxlEncoderSetParallelRunner");
 
-    JxlEncoderOptions *opts;
-    if(!(opts = JxlEncoderOptionsCreate(enc, NULL)))
-        RETURN_ERR("Failed in JxlEncoderOptionsCreate");
+    JxlEncoderFrameSettings *opts;
+    if(!(opts = JxlEncoderFrameSettingsCreate(enc, NULL)))
+        RETURN_ERR("Failed in JxlEncoderFrameSettingsCreate");
 
     JxlPixelFormat pixel_format = { .align = 0, .data_type = JXL_TYPE_UINT8, .num_channels = 4, .endianness = JXL_NATIVE_ENDIAN};
 
@@ -689,6 +697,14 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
 
     if(JxlEncoderSetBasicInfo(enc, &basic_info) != JXL_ENC_SUCCESS)
         RETURN_ERR("Failed to set encoder parameters with dimensions %d x %d", im->w, im->h);
+
+    /* Switch to codestream level 10 if required */
+    int level;
+    if((level = JxlEncoderGetRequiredCodestreamLevel(enc)) == 10)
+    {
+        if(JxlEncoderSetCodestreamLevel(enc, level) != JXL_ENC_SUCCESS)
+            RETURN_ERR("Failed in JxlEncoderSetCodestreamLevel(%d)", level);
+    }
 
     JxlColorEncoding color;
     JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
@@ -710,16 +726,16 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
         // If quality is maxed out, explicity enable lossless mode
         if(quality == max_quality)
         {
-            if(JxlEncoderOptionsSetLossless(opts, 1) != JXL_ENC_SUCCESS)
-                RETURN_ERR("Failed in JxlEncoderOptionsSetLossless");
+            if(JxlEncoderSetFrameLossless(opts, JXL_TRUE) != JXL_ENC_SUCCESS)
+                RETURN_ERR("Failed in JxlEncoderSetFrameLossless");
             DEBUG_PRINTF("Lossless encoding");
         }
         else
         {
             // Transform quality 0-99 to distance 15-0
             float distance = 15 - (quality * 15/(float)max_quality);
-            if(JxlEncoderOptionsSetDistance(opts, distance) != JXL_ENC_SUCCESS)
-                RETURN_ERR("Failed in JxlEncoderOptionsSetDistance: %.1f", distance);
+            if(JxlEncoderSetFrameDistance(opts, distance) != JXL_ENC_SUCCESS)
+                RETURN_ERR("Failed in JxlEncoderSetFrameDistance: %.1f", distance);
             DEBUG_PRINTF("Butteraugli distance = %.1f", distance);
         }
     }
@@ -733,8 +749,8 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
                           (tag->val > 9) ? 9 :
                            tag->val;
 
-        if(JxlEncoderOptionsSetInteger(opts, JXL_ENC_OPTION_EFFORT, compression) != JXL_ENC_SUCCESS)
-            RETURN_ERR("Failed in JxlEncoderOptionsSetInteger(JXL_ENC_OPTION_EFFORT, %d)", compression);
+        if(JxlEncoderFrameSettingsSetOption(opts, JXL_ENC_FRAME_SETTING_EFFORT, compression) != JXL_ENC_SUCCESS)
+            RETURN_ERR("Failed in JxlEncoderFrameSettingsSetOption(JXL_ENC_FRAME_SETTING_EFFORT, %d)", compression);
 
         DEBUG_PRINTF("Effort = %d", compression);
     }
@@ -802,23 +818,23 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
 
     while((res = JxlEncoderProcessOutput(enc, &next_out, &avail_out)) != JXL_ENC_SUCCESS)
     {
-       if(res == JXL_ENC_NEED_MORE_OUTPUT)
-       {
-           if(next_out == jxl_bytes)
-               RETURN_ERR("Encoding stalled");
+        if(res == JXL_ENC_NEED_MORE_OUTPUT)
+        {
+            if(next_out == jxl_bytes)
+                RETURN_ERR("Encoding stalled");
 
-           // Flush what we've got to clear the output buffer and continue
+            // Flush what we've got to clear the output buffer and continue
 
-           if(fwrite(jxl_bytes, 1, jxl_bytes_size - avail_out, out) != jxl_bytes_size-avail_out)
-               RETURN_ERR("Failed to write %zu B", jxl_bytes_size - avail_out);
+            if(fwrite(jxl_bytes, 1, jxl_bytes_size - avail_out, out) != jxl_bytes_size-avail_out)
+                RETURN_ERR("Failed to write %zu B", jxl_bytes_size - avail_out);
 
-           next_out = jxl_bytes;
-           avail_out = jxl_bytes_size;
-       }
-       else
-       {
-           RETURN_ERR("Error during encoding");
-       }
+            next_out = jxl_bytes;
+            avail_out = jxl_bytes_size;
+        }
+        else
+        {
+            RETURN_ERR("Error during encoding");
+        }
     }
 
     if(fwrite(jxl_bytes, 1, jxl_bytes_size - avail_out, out) != jxl_bytes_size-avail_out)
