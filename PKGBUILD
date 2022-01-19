@@ -6,7 +6,7 @@ pkgdesc="JPEG XL loader for imlib2"
 arch=(x86_64)
 url="https://github.com/alistair7/$_pkgname"
 license=(BSD)
-depends=(imlib2 libjxl lcms2)
+depends=(imlib2 libjxl-git lcms2)
 makedepends=(git)
 # Conflicts with any non-git version
 conflicts=("$_pkgname")
