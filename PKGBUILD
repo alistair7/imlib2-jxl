@@ -19,8 +19,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 _pkgname=imlib2-jxl
-pkgname="$_pkgname-git"
-pkgver=r8.baa0155
+pkgname="$_pkgname"
+pkgver=0.1
 pkgrel=1
 pkgdesc="JPEG XL loader for imlib2"
 arch=('x86_64')
@@ -29,23 +29,22 @@ license=('BSD')
 depends=('imlib2' 'libjxl' 'lcms2')
 makedepends=('git')
 provides=("$_pkgname")
-conflicts=("$_pkgname")
+conflicts=("$_pkgname-git")
 options=()
 install=
 source=("$_pkgname"::"git+https://github.com/alistair7/$_pkgname.git")
 md5sums=('SKIP')
 
+_branch=v0.1.x
+
 pkgver() {
     cd "$_pkgname"
-    (
-        set -o pipefail
-        #git describe --long --tag | sed -r 's/([^-]*-g)/r\1/;s/-/./g' ||
-        printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
-    )
+    git describe --tags --abbrev=0 "$_branch" | sed s/v//
 }
 
 build() {
     cd "$_pkgname"
+    git checkout --quiet "$_branch"
     make
 }
 
