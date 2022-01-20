@@ -19,8 +19,10 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 _pkgname=imlib2-jxl
+_branch=v0.1.x
+
 pkgname="$_pkgname"
-pkgver=0.1
+pkgver=0.1.1r14.5ed84f3
 pkgrel=1
 pkgdesc="JPEG XL loader for imlib2"
 arch=('x86_64')
@@ -32,19 +34,22 @@ provides=("$_pkgname")
 conflicts=("$_pkgname-git")
 options=()
 install=
-source=("$_pkgname"::"git+https://github.com/alistair7/$_pkgname.git")
+source=("$_pkgname"::"git+https://github.com/alistair7/$_pkgname.git#branch=$_branch")
 md5sums=('SKIP')
 
-_branch=v0.1.x
 
 pkgver() {
     cd "$_pkgname"
-    git describe --tags --abbrev=0 "$_branch" | sed s/v//
+    (
+        LATEST_TAG="$(git describe --long --tags 2>/dev/null | sed -r 's/^v?([0-9.]+).*$/\1/')"
+        [ -z "$LATEST_TAG" ] && LATEST_TAG=0
+        set -o pipefail
+        printf "%sr%s.%s" "$LATEST_TAG" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    )
 }
 
 build() {
     cd "$_pkgname"
-    git checkout --quiet "$_branch"
     make
 }
 
