@@ -6,27 +6,46 @@ All JPEG XL files are supported, with the following limitations:
 * For animated JXLs, only the first frame is decoded.
 
 
-### Build ###
-The loader has been built and tested on Linux (Kubuntu x86_64, Arch x86_64) using gcc and clang.  It only comes with a dumb makefile, as I'm not clever enough to create a configure script or use cmake.  However, the source was written to be portable and the build is fairly trivial, so it should be easy to get it working wherever you can install imlib2 and a C99 compiler.
+### Build / Install ###
+The loader has been built and tested on Linux (Kubuntu x86_64, Arch x86_64) using gcc and clang.
 
-#### Build Dependencies ####
-* make.
+#### Dependencies ####
 * [imlib2](https://docs.enlightenment.org/api/imlib2/html/) with development headers (libimlib2-dev for Debian and similar).
 * [libjxl](https://github.com/libjxl/libjxl) with development headers.
 * [liblcms2](https://github.com/mm2/Little-CMS) with development headers (liblcms2-dev for Debian and similar).
 
-Once those are installed...
+#### Arch Linux ####
+There is a PKGBUILD available in AUR for easy installation of the latest release on Arch Linux:
+
+```bash
+git clone https://aur.archlinux.org/imlib2-jxl.git
+cd imlib2-jxl
+# (You should now review PKGBUILD before proceeding)
+makepkg -s
+sudo pacman -U imlib2-jxl-x.y.z.pkg.tar.zst
+```
+
+To install the cutting-edge git version, use the alternative package from https://aur.archlinux.org/imlib2-jxl-git.git.
+
+#### Other Linuxes ####
+
+Ensure the above dependencies are installed.  Download the imlib2-jxl source - either a release archive or the latest commit:
 ```
 git clone https://github.com/alistair7/imlib2-jxl.git
+```
+
+Then simply running `make` should produce jxl.so:
+```
 cd imlib2-jxl
 make
+sudo make install
 ```
-This should produce jxl.so.
 
-### Install ###
-You need to install jxl.so to a location where imlib2 can find it.  On 64-bit Kubuntu this is /usr/lib/x86_64-linux-gnu/imlib2/loaders.  On Arch this is /usr/lib/imlib2/loaders.  `sudo make install` attempts to find the right location via pkg-config and copy the library there.  If that fails, you'll have to copy it to the right location yourself.
+`make install` attempts to find the right location for the loader via pkg-config and copy jxl.so there. If this fails, you'll have to manually identify the
+directory for imlib2 loaders and copy jxl.so there yourself.  On 64-bit Kubuntu this is /usr/lib/x86_64-linux-gnu/imlib2/loaders.
+On Arch this is /usr/lib/imlib2/loaders.
 
-#### feh ####
+### feh ###
 If you are using a version of feh between 3.6 and 3.7.0, inclusive, JXL files will not be recognised (due to [#505](https://github.com/derf/feh/issues/505)), and you will get an error similar to
 ```
 feh WARNING: asdf.jxl - Does not look like an image (magic bytes missing)
