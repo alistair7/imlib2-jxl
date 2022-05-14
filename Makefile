@@ -1,6 +1,6 @@
 CPPFLAGS += -DIMLIB2JXL_USE_LCMS
-RELEASE_CFLAGS ?= -O3 -march=native
-DEBUG_CFLAGS ?= -O0 -g
+RELEASE_CFLAGS ?= -O2 -march=native
+DEBUG_CFLAGS ?= -Og -g
 SHARED_CFLAGS := -Wall -Wextra `pkg-config imlib2 --cflags` `pkg-config lcms2 --cflags` -fPIC
 LDFLAGS += `pkg-config imlib2 --libs` -ljxl_threads -ljxl `pkg-config lcms2 --libs`
 
