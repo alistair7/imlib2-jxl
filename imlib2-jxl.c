@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <math.h>
+#include <inttypes.h>
 
 #include <jxl/decode.h>
 #include <jxl/encode.h>
@@ -20,14 +21,17 @@
 #include <lcms2.h>
 #endif
 
-#include "loader.h"
+// If your distribution doesn't provide this header with its imlib2 package,
+// it's available at https://git.enlightenment.org/old/legacy-imlib2/src/branch/master/src/lib/Imlib2_Loader.h
+#include "Imlib2_Loader.h"
 
 /**
  * Convenience macro that prints a message to stderr and jumps to the "ret" label.
  */
-#define RETURN_ERR(...) \
+#define RETURN_ERR(rv, ...) \
 do { \
     myprintf(stderr, __FILE__, __func__, __LINE__, __VA_ARGS__); \
+    retval = (rv); \
     goto ret; \
 }while(0)
 
@@ -60,7 +64,6 @@ do { \
 #define DEBUG_PRINTF(...)
 #endif
 
-
 #ifdef __GNUC__
 static void myprintf(FILE *to, const char *file, const char *func, unsigned line, const char *format, ...)
 __attribute__(( format(printf,5,6) ));
@@ -80,42 +83,7 @@ static void myprintf(FILE *to, const char *file, const char *func, unsigned line
 }
 
 
-
-/**
- * @brief Function called by imlib2 to ask your loader what formats it supports.
- *
- * Set @c l->num_formats to the number of supported formats.
- *
- * Set @c l->formats to a heap-allocated array of <tt>char*</tt> with a number of
- * elements equal to @c l->num_formats.
- *
- * Each element of @c l->formats should point to a heap-allocated string defining
- * the format.
- */
-void formats(ImlibLoader *l)
-{
-    DEBUG_PRINTF("imblib2-jxl");
-
-    // imlib2 just defines DATA32 as an unsigned int, which isn't necessarily 32 bits.  So add a check just in case...
-    // Note the optimizer removes this code entirely if the condition is false.
-    if(sizeof(DATA32) != sizeof(uint32_t))
-    {
-        WARN_PRINTF("Loader relies on unsigned ints being 4 bytes long, but they're %zu B long.", sizeof(DATA32));
-        l->num_formats = 0;
-        l->formats = NULL;
-    }
-
-#ifdef IMLIB2JXL_USE_LCMS
-    if(LCMS_VERSION != cmsGetEncodedCMMversion())
-        WARN_PRINTF("Warning: jxl loader was compiled against a different version of liblcms!");
-#endif
-
-    static const char jxl[] = "jxl";
-    l->num_formats = 1;
-    l->formats = malloc(sizeof(char*));
-    l->formats[0] = malloc(sizeof(jxl));
-    memcpy(l->formats[0], jxl, sizeof(jxl));
-}
+static const char* const formats[] = { "jxl" };
 
 
 
@@ -133,6 +101,9 @@ void formats(ImlibLoader *l)
  */
 static char *get_icc_description(cmsHPROFILE icc)
 {
+    if(LCMS_VERSION != cmsGetEncodedCMMversion())
+        WARN_PRINTF("Warning: jxl loader was compiled against a different version of liblcms!");
+
     char *retval = NULL;
     const char *lang = "en";
     const char *country = "US";
@@ -163,7 +134,7 @@ static char *get_icc_description(cmsHPROFILE icc)
 
     cmsUInt32Number required = cmsGetProfileInfoASCII(icc, infoType, lang, country, NULL, 0);
     if(!(retval = malloc(required)))
-        RETURN_ERR("Failed to allocate %u B for ICC description", (unsigned)required);
+        RETURN_ERR(NULL, "Failed to allocate %u B for ICC description", (unsigned)required);
 
     cmsGetProfileInfoASCII(icc, infoType, lang, country, retval, required);
 
@@ -174,53 +145,85 @@ ret:
 
 
 /**
- * @brief Convert pixels to sRGB from whatever colorspace they're currently using.
+ * @brief Convert pixels to sRGB from whatever profile they're currently using.
  *
- * @param[in] input_icc_blob Pointer to ICC profile blob representing the current colorspace.
+ * The input is always 8-bit interleaved channels in a fixed order. The format is indicated by @p num_channels:
+ * - num_channels == 1 : Gray
+ * - num_channels == 2 : Gray + Alpha
+ * - num_channels == 3 : RGB
+ * - num_channels == 4 : RGB + Alpha
+ * 
+ * The output is always word-ordered ARGB, 4 bytes per pixel, as expected by imlib2.
+ * 
+ * TODO: Transforming integer pixels will incur rounding errors, but would using a float buffer be worth the overhead?
+ * 
+ * @param[in] input_icc_blob Pointer to ICC profile blob representing the current profile.
  * @param[in] icc_blob_size Number of bytes in the profile referenced by @p input_icc_blob.
- * @param[in] px_in Pointer to current pixel data.  Expected to be 32 bits per pixel byte-ordered RGBA (TYPE_RGBA_8 in LCMS).
- * @param[out] px_out Pointer to a buffer where the transformed pixel data will be written - 32-bit word-ordered ARGB.
- * @param[in] num_pixels Number of pixels to transform.  Both @p px_in and @p px_out should
- *            be at least 4 * @p num_pixels long.
- * @param[in] preserve_alpha If true, the alpha values are copied to the output (LCMS loses this data by default.)
+ * @param[in] px_in Pointer to current pixel data.
+ * @param[out] px_out Pointer to a buffer where the transformed pixel data will be written.
+ * @param[in] num_pixels Number of pixels to transform. @p px_out should be at least `4 * num_pixels` bytes long.
  *
  * @return 0 on success.
  */
-static int convert_to_srgb(uint8_t *input_icc_blob, size_t icc_blob_size, const uint8_t *px_in, uint8_t *px_out, size_t num_pixels, bool preserve_alpha)
+static int convert_to_srgb(uint8_t *input_icc_blob, size_t icc_blob_size, const void *px_in, void *px_out, size_t num_pixels, int num_channels)
 {
     int retval = -1;
     cmsHPROFILE source_icc = NULL;
     cmsHPROFILE srgb_icc = NULL;
     cmsHTRANSFORM trans = NULL;
     cmsContext ctx = NULL;
+    //cmsToneCurve* srgb_tonecurve = NULL;
 #ifdef IMLIB2JXL_DEBUG
     char *src_icc_name = NULL;
     char *dst_icc_name = NULL;
 #endif
-
+    
     if(!(ctx = cmsCreateContext(NULL, NULL)))
-        RETURN_ERR("Failed to create lcms context");
+        RETURN_ERR(-1, "Failed to create lcms context");
 
     if(!(source_icc = cmsOpenProfileFromMemTHR(ctx, input_icc_blob, icc_blob_size)))
-        RETURN_ERR("Failed to create color profile from %zu B ICC data", icc_blob_size);
+        RETURN_ERR(-1, "Failed to create color profile from %zu B ICC data", icc_blob_size);
 
     if(!(srgb_icc = cmsCreate_sRGBProfileTHR(ctx)))
-        RETURN_ERR("Failed to create sRGB color profile");
+        RETURN_ERR(-1, "Failed to create sRGB color profile");
+    
+    cmsUInt32Number input_format;
+    switch(num_channels)
+    {
+        case 3: input_format = TYPE_RGB_8; break;
+        case 4: input_format = TYPE_RGBA_8; break;
+        case 1: input_format = TYPE_GRAY_8; break;
+        case 2: input_format = TYPE_GRAYA_8; break;
+        default:
+            RETURN_ERR(-1, "Unsupported number of channels (%d)", num_channels);
+    }
+    
+    //if(is_gray)
+    //{
+    //    // No convenient function for creating a gray sRGB profile, so have to build it.
+    //    static const cmsCIExyY d65 = {0.3127, 0.3291, 1.0};
+    //    static const cmsFloat64Number srgbCurveParams[] = {2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045};
+    //    if(!(srgb_tonecurve =  cmsBuildParametricToneCurve(ctx, 4/*sRGB*/, srgbCurveParams)))
+    //        RETURN_ERR(-1, "Failed to create sRGB tone curve");
+    //    if(!(srgb_icc = cmsCreateGrayProfileTHR(ctx, &d65, srgb_tonecurve)))
+    //        RETURN_ERR(-1, "Failed to create sRGB color profile");
+    //    input_format = TYPE_GRAYA_8;
+    //}
 
 #ifdef IMLIB2JXL_DEBUG
     if((src_icc_name = get_icc_description(source_icc)) &&
        (dst_icc_name = get_icc_description(srgb_icc)))
     {
-        DEBUG_PRINTF("Converting color space [%s] -> [%s]", src_icc_name, dst_icc_name);
+        DEBUG_PRINTF("Converting color space [%s] -> [%s]; num_pixels=%zu num_channels=%d",
+                     src_icc_name, dst_icc_name, num_pixels, num_channels);
     }
 #endif
 
     // To avoid shuffling the channels again later, set the output format to the required TYPE_ARGB_8
 
-
-    if(!(trans = cmsCreateTransformTHR(ctx, source_icc, TYPE_RGBA_8, srgb_icc,
+    if(!(trans = cmsCreateTransformTHR(ctx, source_icc, input_format, srgb_icc,
                                        IS_BIG_ENDIAN() ? TYPE_ARGB_8 : TYPE_BGRA_8,
-                                       cmsGetHeaderRenderingIntent(source_icc), 0)))
+                                       cmsGetHeaderRenderingIntent(source_icc), cmsFLAGS_COPY_ALPHA)))
     {
 #ifdef IMLIB2JXL_DEBUG
         char *from = get_icc_description(source_icc);
@@ -233,21 +236,6 @@ static int convert_to_srgb(uint8_t *input_icc_blob, size_t icc_blob_size, const 
     }
 
     cmsDoTransform(trans, px_in, px_out, num_pixels);
-
-    if(preserve_alpha)
-    {
-        if(IS_BIG_ENDIAN())
-        {
-            for(size_t i=0; i<num_pixels; i++)
-                px_out[4*i] = px_in[4*i + 3];
-        }
-        else
-        {
-            for(size_t i=0; i<num_pixels; i++)
-                px_out[4*i + 3] = px_in[4*i + 3];
-        }
-    }
-
     retval = 0;
 
 ret:
@@ -257,6 +245,8 @@ ret:
         cmsCloseProfile(srgb_icc);
     if(source_icc)
         cmsCloseProfile(source_icc);
+    //if(srgb_tonecurve)
+    //    cmsFreeToneCurve(srgb_tonecurve);
     if(ctx)
         cmsDeleteContext(ctx);
 #ifdef IMLIB2JXL_DEBUG
@@ -288,60 +278,14 @@ static bool near_equal(unsigned length, const double *v1, const double *v2)
 #endif // IMLIB2JXL_USE_LCMS
 
 
-/**
- * @brief Function called by imlib2 when it wants your loader to decode an image file.
- *
- * This function should read the input file (@c im->real_file), produce an array of raw pixel data,
- * and assign this to @c im->data.
- * The required format is described by this extract from imlib2's API documentation:<br/>
- *
- *     The image data is returned in the format of a DATA32 (32 bits) per pixel in a linear array ordered from the top
- *     left of the image to the bottom right going from left to right each line. Each pixel has the upper 8 bits as
- *     the alpha channel and the lower 8 bits are the blue channel - so a pixel's bits are ARGB (from most to least
- *     significant, 8 bits per channel.
- *
- * So on a little endian architecture, the required byte layout is B G R A.
- *
- * By default, imlib2 will pass @c im->data to <tt>free()</tt> when it has finished with the pixels.
- * You can prevent that by setting the @c F_DONT_FREE_DATA flag.
- *
- * @param[in] im->real_file The name of the file we should open and read.
- * @param[in] im->file ??? (use @c real_file instead.)
- * @param[out] im->data Make this point to the decoded pixel data, always 32-bit ARGB.
- * @param[out] im->format Make this point to a string describing the decoded file format,
- *             or leave as @c NULL to let imlib2 use the loader's default.
- * @param[out] im->w,im->h Image width and height, respectively, in pixels.
- * @param[out] im->flags A bitwise combination of @c ImlibImageFlags setting various properties
- *             of the image.  Important ones are @c F_HAS_ALPHA, which should be set if the
- *             decoded image isn't fully opaque; and @c F_DONT_FREE_DATA, which tells imlib2
- *             not to <tt>free(im->data)</tt>, in case we want to manage the memory ourselves.
- *
- * @param[in] progress Callback function which, if set, we're supposed to call periodically to
- *                     let the caller know much of the decoding is complete.
- * @param[in] progress_granularity ???
- * @param[in] immediate_load If non-zero, the caller wants us to decode the whole image and set
- *                           @c im->data to point to the allocated data.
- *                           If zero, we should not decode the whole image, and instead return
- *                           as soon as we've set the metadata (@c im->w, @c im->h, @c im->format).
- *
- * @return Non-zero on success
- * @return 0 on failure
- */
-char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granularity, char immediate_load)
+static int load(ImlibImage* im, int load_data)
 {
-#ifdef __GNUC__
-    (void)progress_granularity;
-#endif
+    DEBUG_PRINTF("Load [%s][%zu]", im->fi->name, (size_t)im->fi->fsize);
 
-    DEBUG_PRINTF("Read [%s] immediate_load[%d]", im->real_file, (int)immediate_load);
-
-    char retval = 0;
+    int retval = LOAD_FAIL;
     JxlDecoder *dec = NULL;
     void *runner = NULL;
-    FILE *in = NULL;
-    char *file_data = NULL;
-    uint8_t *pixels = NULL;
-    size_t pixels_size = 0;
+    uint8_t *target = NULL;
 
 #ifdef IMLIB2JXL_USE_LCMS
     uint8_t *icc_blob = NULL;
@@ -351,43 +295,26 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
     const int events = JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE;
 #endif
 
-
     // Initialize decoder
-    if(im->data)
-        RETURN_ERR("ImlibImage data field is not NULL");
-
     if(!(dec = JxlDecoderCreate(NULL)))
-        RETURN_ERR("Failed in JxlDecoderCreate");
+        RETURN_ERR(LOAD_FAIL, "Failed in JxlDecoderCreate");
 
     if(!(runner = JxlThreadParallelRunnerCreate(NULL, JxlThreadParallelRunnerDefaultNumWorkerThreads())))
-        RETURN_ERR("Failed in JxlThreadParallelRunnerCreate");
+        RETURN_ERR(LOAD_FAIL, "Failed in JxlThreadParallelRunnerCreate");
 
     if(JxlDecoderSetParallelRunner(dec, JxlThreadParallelRunner, runner) != JXL_DEC_SUCCESS)
-        RETURN_ERR("Failed in JxlDecoderSetParallelRunner");
+        RETURN_ERR(LOAD_FAIL, "Failed in JxlDecoderSetParallelRunner");
 
     if(JxlDecoderSubscribeEvents(dec, events) != JXL_DEC_SUCCESS)
-        RETURN_ERR("Failed in JxlDecoderSubscribeEvents");
+        RETURN_ERR(LOAD_FAIL, "Failed in JxlDecoderSubscribeEvents");
 
-    if(!(in = fopen(im->real_file, "rb")))
-        RETURN_ERR("Failed to open %s for reading; %s", im->real_file, strerror(errno));
+    if(JxlDecoderSetInput(dec, (const uint8_t*)im->fi->fdata, im->fi->fsize) != JXL_DEC_SUCCESS)
+        RETURN_ERR(LOAD_BADIMAGE, "Failed in JxlDecoderSetInput");
 
-    // Buffer input file
-    if(fseek(in, 0, SEEK_END) != 0)
-        RETURN_ERR("Input file isn't seekable");
-    size_t data_len = ftell(in);
-    fseek(in, 0, SEEK_SET);
-    if(!(file_data = malloc(data_len)))
-        RETURN_ERR("Failed to allocate %zu B", data_len);
-    if(fread(file_data, 1, data_len, in) != data_len)
-        RETURN_ERR("Failed to read %zu B", data_len);
-    fclose(in);
-    in = NULL;
-
-    if(JxlDecoderSetInput(dec, (const uint8_t*)file_data, data_len) != JXL_DEC_SUCCESS)
-        RETURN_ERR("Failed in JxlDecoderSetInput");
-
-
+    
     // Start decoding
+    size_t num_pixels = 0;
+    size_t pixels_size = 0; // Total size of raw pixels in bytes
     JxlDecoderStatus res;
     JxlBasicInfo basic_info;
     JxlPixelFormat pixel_format = {
@@ -399,92 +326,87 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
 
     while((res = JxlDecoderProcessInput(dec)) != JXL_DEC_FULL_IMAGE)
     {
-
         switch(res)
         {
         case JXL_DEC_BASIC_INFO:
 
             if((res = JxlDecoderGetBasicInfo(dec, &basic_info)) != JXL_DEC_SUCCESS)
-                RETURN_ERR("Failed in JxlDecoderGetBasicInfo");
+                RETURN_ERR(LOAD_BADIMAGE, "Failed in JxlDecoderGetBasicInfo");
 
             DEBUG_PRINTF("%ux%u RGB%s", basic_info.xsize, basic_info.ysize, basic_info.alpha_bits>0 ? "A" : "");
 
             if(!IMAGE_DIMENSIONS_OK(basic_info.xsize, basic_info.ysize))
-                RETURN_ERR("Dimensions %ux%u are not supported by imlib2", basic_info.xsize, basic_info.ysize);
+                RETURN_ERR(LOAD_BADIMAGE, "Dimensions %ux%u are not supported by imlib2", basic_info.xsize, basic_info.ysize);
 
             im->w = basic_info.xsize;
             im->h = basic_info.ysize;
-
-            if(basic_info.alpha_bits > 0)
-                SET_FLAG(im->flags, F_HAS_ALPHA);
-
+            num_pixels = basic_info.xsize * basic_info.ysize;
+            im->has_alpha = basic_info.alpha_bits > 0;
+            pixel_format.num_channels = ((basic_info.num_color_channels >= 3) ? 3 : 1) + (basic_info.alpha_bits > 0);
+            
             // If imlib2 only wants the metadata, return now
-            if (!immediate_load)
+            if (!load_data)
             {
-                retval = 1;
+                retval = LOAD_SUCCESS;
                 goto ret;
             }
 
-            if(progress)
-                progress(im, 1, 0, 0, basic_info.xsize, basic_info.ysize); // 1% done!
             break;
 
 #ifdef IMLIB2JXL_USE_LCMS
         case JXL_DEC_COLOR_ENCODING:
         {
-            if(basic_info.num_color_channels < 3)
-            {
-                /* Converting color profiles for grayscale input is currently broken, so skip for now. */
-                DEBUG_PRINTF("Ignored color encoding for grayscale image");
-                break;
-            }
+            //if(basic_info.num_color_channels < 3)
+            //{
+            //    /* Converting color profiles for grayscale input is currently broken, so skip for now. */
+            //    DEBUG_PRINTF("Ignored color encoding for grayscale image");
+            //    break;
+            //}
 
-            /* If libjxl claims the decoded pixels will be sRGB, don't bother converting anything.
+            // If the decoder can produce srgb, it should.
+            //JxlDecoderSetCms(); // not implemented in libjxl yet
+            JxlColorEncoding srgb;
+            JxlColorEncodingSetToSRGB(&srgb, /*is_gray=*/basic_info.num_color_channels == 1);
+            if(JxlDecoderSetPreferredColorProfile(dec, &srgb) != JXL_DEC_SUCCESS)
+                WARN_PRINTF("Cannot set preferred output color profile");
+
+            /* If libjxl claims the decoded pixels will be RGB/sRGB, don't bother converting anything.
              * If there's no JPEG-XL-encoded profile, or it's something other than sRGB, try to
              * extract an ICC profile and save it for later. */
-
-            /* Approximation of the color profile we're calling "sRGB",
-             * based on CIE Standard Illuminant (D65) and primaries (to 5dp),
-             * IEC 61966-2-1 sRGB transfer functions. */
-            static const double d65[] = {.3127, .3290};
-            static const double primaries_r[] = {.64, .33001};
-            static const double primaries_g[] = {.3,  .6};
-            static const double primaries_b[] = {.15, .06};
-            static const double gamma = .45455;
 
             JxlColorEncoding color_enc;
             if(JxlDecoderGetColorAsEncodedProfile(dec, &pixel_format, JXL_COLOR_PROFILE_TARGET_DATA, &color_enc) == JXL_DEC_SUCCESS)
             {
 
-                if(color_enc.color_space == JXL_COLOR_SPACE_RGB
+                if((color_enc.color_space == JXL_COLOR_SPACE_RGB || color_enc.color_space == JXL_COLOR_SPACE_GRAY)
                    &&
-                   (
-                     /* Transfer function is IEC sRGB or near-as-damn-it power law */
-                     color_enc.transfer_function == JXL_TRANSFER_FUNCTION_SRGB ||
-                     ( color_enc.transfer_function == JXL_TRANSFER_FUNCTION_GAMMA && near_equal(1, &color_enc.gamma, &gamma) )
+                   /* Transfer function is IEC sRGB */
+                   color_enc.transfer_function == JXL_TRANSFER_FUNCTION_SRGB
+                   &&
+                   (color_enc.color_space == JXL_COLOR_SPACE_GRAY ||
+                     (
+                       /* Primaries are CIE sRGB or close enough */
+                       color_enc.primaries == JXL_PRIMARIES_SRGB ||
+                       (color_enc.primaries == JXL_PRIMARIES_CUSTOM &&
+                         near_equal(2, color_enc.primaries_red_xy, srgb.primaries_red_xy) &&
+                         near_equal(2, color_enc.primaries_green_xy, srgb.primaries_green_xy) &&
+                         near_equal(2, color_enc.primaries_blue_xy, srgb.primaries_blue_xy)
+                       )
+                     )
                    )
                    &&
-                   (
-                     /* Primaries are CIE sRGB or close enough */
-                     color_enc.primaries == JXL_PRIMARIES_SRGB ||
-                     (color_enc.primaries == JXL_PRIMARIES_CUSTOM &&
-                       near_equal(2, color_enc.primaries_red_xy, primaries_r) &&
-                       near_equal(2, color_enc.primaries_green_xy, primaries_g) &&
-                       near_equal(2, color_enc.primaries_blue_xy, primaries_b)
-                     )
-                   ) &&
                    (
                     /* White point is, or could pass for, D65 */
                      color_enc.white_point == JXL_WHITE_POINT_D65 ||
-                    (color_enc.white_point == JXL_WHITE_POINT_CUSTOM && near_equal(2, color_enc.white_point_xy, d65))
+                    (color_enc.white_point == JXL_WHITE_POINT_CUSTOM && near_equal(2, color_enc.white_point_xy, srgb.white_point_xy))
                    )
                   )
                 {
-                    DEBUG_PRINTF("Encoded color profile is %s sRGB/D65",
+                    DEBUG_PRINTF("Encoded color profile is %s %ssRGB/D65",
                                  color_enc.transfer_function == JXL_TRANSFER_FUNCTION_SRGB &&
-                                 color_enc.primaries == JXL_PRIMARIES_SRGB &&
                                  color_enc.white_point == JXL_WHITE_POINT_D65
-                                 ? "exactly" : "nearly" );
+                                 ? "exactly" : "nearly",
+                                 color_enc.color_space == JXL_COLOR_SPACE_GRAY ? "(gray) " : "");
                     break;
                 }
             }
@@ -496,7 +418,7 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
             }
 
             if(!(icc_blob = malloc(icc_size)))
-                RETURN_ERR("Failed to allocate %zu B for ICC profile", icc_size);
+                RETURN_ERR(LOAD_OOM, "Failed to allocate %zu B for ICC profile", icc_size);
 
             if(JxlDecoderGetColorAsICCProfile(dec, &pixel_format, JXL_COLOR_PROFILE_TARGET_DATA, icc_blob, icc_size) != JXL_DEC_SUCCESS)
             {
@@ -515,36 +437,40 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
         case JXL_DEC_NEED_IMAGE_OUT_BUFFER:
             // Time to allocate some space for the pixels
             if (JxlDecoderImageOutBufferSize(dec, &pixel_format, &pixels_size) != JXL_DEC_SUCCESS )
-                RETURN_ERR("Failed in JxlDecoderImageOutBufferSize");
+                RETURN_ERR(LOAD_FAIL, "Failed in JxlDecoderImageOutBufferSize");
 
             // Sanity check
             if (pixels_size != (size_t)basic_info.xsize * basic_info.ysize * pixel_format.num_channels)
-                RETURN_ERR("Pixel buffer size is %zu, but expected (%u * %u * %u) = %zu",
+                RETURN_ERR(LOAD_FAIL, "Pixel buffer size is %zu, but expected (%u * %u * %u) = %zu",
                            pixels_size, basic_info.xsize, basic_info.ysize, pixel_format.num_channels,
                            (size_t)basic_info.xsize * basic_info.ysize * pixel_format.num_channels);
 
-            if(!(pixels = malloc(pixels_size)))
-                RETURN_ERR("Failed to allocate %zu B", pixels_size);
+            if (!(target = malloc(pixels_size * sizeof(uint8_t))))
+                RETURN_ERR(LOAD_OOM, "Failed to allocate %zu B for pixels", pixels_size);
 
-            if (JxlDecoderSetImageOutBuffer(dec, &pixel_format, pixels, pixels_size) != JXL_DEC_SUCCESS)
-                RETURN_ERR("Failed in JxlDecoderSetImageOutBuffer");
+            if (JxlDecoderSetImageOutBuffer(dec, &pixel_format, target, pixels_size) != JXL_DEC_SUCCESS)
+                RETURN_ERR(LOAD_FAIL, "Failed in JxlDecoderSetImageOutBuffer");
 
             break;
 
         case JXL_DEC_NEED_MORE_INPUT:
-            RETURN_ERR("Input truncated");
+            RETURN_ERR(LOAD_BADIMAGE, "Input truncated");
 
         case JXL_DEC_ERROR:
         {
-            JxlSignature sig = JxlSignatureCheck((uint8_t*)file_data, data_len);
-            RETURN_ERR("Error while decoding: %s", (sig == JXL_SIG_CODESTREAM || sig == JXL_SIG_CONTAINER) ? "corrupted file?" : "not a JPEG XL file!");
+            JxlSignature sig = JxlSignatureCheck((uint8_t*)im->fi->fdata, im->fi->fsize);
+            RETURN_ERR(LOAD_BADIMAGE, "Error while decoding: %s", (sig == JXL_SIG_CODESTREAM || sig == JXL_SIG_CONTAINER) ? "corrupted file?" : "not a JPEG XL file!");
         }
 
         default:
-            RETURN_ERR("Unexpected result from JxlDecoderProcessInput");
+            RETURN_ERR(LOAD_FAIL, "Unexpected result from JxlDecoderProcessInput");
       }
 
     }
+
+    // Allocate buffer for im->data
+    if(!__imlib_AllocateData(im))
+        RETURN_ERR(LOAD_OOM, "Failed in __imlib_AllocateData");
 
     // Data from libjxl is byte-ordered RGBA, so now have to swap the channels around for imlib2
     // ...but if we're doing a color space transformation, we can swap channels at the same time, so
@@ -555,20 +481,15 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
 
     if(icc_size > 0)
     {
-        uint8_t *srgb_pixels = malloc(pixels_size);
-        if(!srgb_pixels)
-            RETURN_ERR("Failed to allocate %zu B for sRGB pixels", pixels_size);
-
-        if(convert_to_srgb(icc_blob, icc_size, pixels, srgb_pixels, basic_info.xsize*basic_info.ysize, basic_info.alpha_bits > 0))
+        // Reinterpret im->data as a uint8_t*, which is unportable,
+        // but awfully convenient when uint8_t == unsigned char.
+        if(convert_to_srgb(icc_blob, icc_size, target, (uint8_t*)(im->data),
+                           num_pixels, pixel_format.num_channels))
         {
-            // Failed
-            free(srgb_pixels);
             WARN_PRINTF("Color space transformation failed, but continuing anyway");
         }
         else
         {
-            free(pixels);
-            pixels = srgb_pixels;
             color_converted = true;
         }
     }
@@ -576,56 +497,39 @@ char load(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
     if(!color_converted)
     {
 #endif
-
-      // Swap channels in place
-      if(IS_BIG_ENDIAN())
-      {
-          // Convert RGBA to ARGB
-          for(uint8_t *px = pixels; px < pixels+pixels_size; px += 4)
-          {
-              uint8_t tmp[4];
-              memcpy(tmp, px, 4);
-              px[0] = tmp[3];
-              px[1] = tmp[0];
-              px[2] = tmp[1];
-              px[3] = tmp[2];
-          }
-      }
-      else
-      {
-          // Convert RGBA to BGRA
-          for(uint8_t *px = pixels; px < pixels+pixels_size; px += 4)
-          {
-              uint8_t tmp = px[0];
-              px[0] = px[2];
-              px[2] = tmp;
-          }
-      }
+        // Convert byte-ordered data in target to word-ordered ARGB
+        if(pixel_format.num_channels == 4)
+        {   // RGBA
+            for (size_t i=0; i<num_pixels; ++i)
+                im->data[i] = PIXEL_ARGB(target[4*i+3], target[4*i+0], target[4*i+1], target[4*i+2]);
+        }
+        else if(pixel_format.num_channels == 3)
+        {   // RGB
+            for (size_t i=0; i<num_pixels; ++i)
+                im->data[i] = PIXEL_ARGB(255u, target[3*i+0], target[3*i+1], target[3*i+2]);
+        }
+        else if(pixel_format.num_channels == 2)
+        {   // GrayA
+            for (size_t i=0; i<num_pixels; ++i)
+                im->data[i] = PIXEL_ARGB(target[2*i+1], target[2*i], target[2*i], target[2*i]);
+        }
+        else
+        {   // Gray
+            for (size_t i=0; i<num_pixels; ++i)
+                im->data[i] = PIXEL_ARGB(255u, target[i], target[i], target[i]);
+        }
 
 #ifdef IMLIB2JXL_USE_LCMS
     }
 #endif
 
-    im->data = (DATA32*)pixels;
-
-    if(progress)
-        progress(im, 100, 0, 0, basic_info.xsize, basic_info.ysize);
-
-    retval = 1;
+    retval = LOAD_SUCCESS;
 
 ret:
 #ifdef IMLIB2JXL_USE_LCMS
     free(icc_blob);
 #endif
-
-    if(retval == 0)
-    {
-       free(pixels);
-       im->data = NULL;
-    }
-    free(file_data);
-    if(in)
-       fclose(in);
+    free(target);
     if(dec)
         JxlDecoderDestroy(dec);
     if(runner)
@@ -635,82 +539,53 @@ ret:
 }
 
 
-
-/**
- * @brief Function called by imlib2 when it wants your loader to write an image file.
- *
- * This function should feed the pixel data in @c im->data through the encoder, and
- * write the result to the file named @c im->real_file.
- *
- * See @ref load for the format of @c im->data.  The number of bytes in the data array
- * is equal to (4 * im->w * im->h).
- *
- * @param[in] im->real_file The name of the file we should open and write.
- * @param[in] im->file ??? (use @c real_file instead.)
- * @param[in] im->w,im->h Image width and height, respectively, in pixels.
- * @param[in] im->data Raw pixel data, always 32-bit ARGB.
- * @param[in] im->flags A bitwise combination of @c ImlibImageFlags setting various properties
- *             of the image.
- * @param[in] progress Callback function which, if set, we're supposed to call periodically to
- *                     let the caller know much of the encoding is complete.
- * @param[in] progress_granularity ???
- *
- * @return Non-zero on success
- * @return 0 on failure
- */
-char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granularity)
+static int save(ImlibImage* im)
 {
-#ifdef __GNUC__
-    (void)progress_granularity;
-#endif
-
-    char retval = 0;
+    int retval = LOAD_FAIL;
     JxlEncoder *enc = NULL;
     void *runner = NULL;
-    FILE *out = NULL;
     uint8_t *pixels = NULL;
     uint8_t *jxl_bytes = NULL;
 
     // Initialize encoder
     if(!(enc = JxlEncoderCreate(NULL)))
-        RETURN_ERR("Failed in JxlEncoderCreate");
+        RETURN_ERR(LOAD_FAIL, "Failed in JxlEncoderCreate");
 
     if(!(runner = JxlThreadParallelRunnerCreate(NULL, JxlThreadParallelRunnerDefaultNumWorkerThreads())))
-        RETURN_ERR("Failed in JxlThreadParallelRunnerCreate");
+        RETURN_ERR(LOAD_FAIL, "Failed in JxlThreadParallelRunnerCreate");
 
     if(JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner) != JXL_ENC_SUCCESS)
-        RETURN_ERR("Failed in JxlEncoderSetParallelRunner");
+        RETURN_ERR(LOAD_FAIL, "Failed in JxlEncoderSetParallelRunner");
 
     JxlEncoderFrameSettings *opts;
     if(!(opts = JxlEncoderFrameSettingsCreate(enc, NULL)))
-        RETURN_ERR("Failed in JxlEncoderFrameSettingsCreate");
+        RETURN_ERR(LOAD_FAIL, "Failed in JxlEncoderFrameSettingsCreate");
 
-    JxlPixelFormat pixel_format = { .align = 0, .data_type = JXL_TYPE_UINT8, .num_channels = 4, .endianness = JXL_NATIVE_ENDIAN};
+    JxlPixelFormat pixel_format = {
+                                      .align = 0,
+                                      .data_type = JXL_TYPE_UINT8,
+                                      .num_channels = 3,
+                                      .endianness = JXL_NATIVE_ENDIAN
+                                  };
 
     JxlBasicInfo basic_info;
     JxlEncoderInitBasicInfo(&basic_info);
-    basic_info.alpha_bits = 8;
-    basic_info.num_extra_channels = 1;
     basic_info.xsize = im->w;
     basic_info.ysize = im->h;
-    basic_info.uses_original_profile = JXL_TRUE;
-
-    if(JxlEncoderSetBasicInfo(enc, &basic_info) != JXL_ENC_SUCCESS)
-        RETURN_ERR("Failed to set encoder parameters with dimensions %d x %d", im->w, im->h);
-
-    /* Switch to codestream level 10 if required */
-    int level;
-    if((level = JxlEncoderGetRequiredCodestreamLevel(enc)) == 10)
+    basic_info.uses_original_profile = JXL_FALSE;
+    if(im->has_alpha)
     {
-        if(JxlEncoderSetCodestreamLevel(enc, level) != JXL_ENC_SUCCESS)
-            RETURN_ERR("Failed in JxlEncoderSetCodestreamLevel(%d)", level);
+        basic_info.alpha_bits = 8;
+        basic_info.num_extra_channels = 1;
+        pixel_format.num_channels = 4;
     }
-
-    JxlColorEncoding color;
-    JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
-    if(JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS)
-        RETURN_ERR("Failed in JXLEncoderSetColorEncoding");
-
+    else
+    {
+        basic_info.alpha_bits = 0;
+        basic_info.num_extra_channels = 0;
+    }
+    size_t num_pixels = basic_info.xsize * basic_info.ysize;
+    
     // Check for specific quality/compression parameters
     ImlibImageTag *tag;
 
@@ -726,8 +601,9 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
         // If quality is maxed out, explicity enable lossless mode
         if(quality == max_quality)
         {
+            basic_info.uses_original_profile = JXL_TRUE;
             if(JxlEncoderSetFrameLossless(opts, JXL_TRUE) != JXL_ENC_SUCCESS)
-                RETURN_ERR("Failed in JxlEncoderSetFrameLossless");
+                RETURN_ERR(LOAD_FAIL, "Failed in JxlEncoderSetFrameLossless");
             DEBUG_PRINTF("Lossless encoding");
         }
         else
@@ -735,7 +611,7 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
             // Transform quality 0-99 to distance 15-0
             float distance = 15 - (quality * 15/(float)max_quality);
             if(JxlEncoderSetFrameDistance(opts, distance) != JXL_ENC_SUCCESS)
-                RETURN_ERR("Failed in JxlEncoderSetFrameDistance: %.1f", distance);
+                RETURN_ERR(LOAD_FAIL, "Failed in JxlEncoderSetFrameDistance: %.1f", distance);
             DEBUG_PRINTF("Butteraugli distance = %.1f", distance);
         }
     }
@@ -750,59 +626,66 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
                            tag->val;
 
         if(JxlEncoderFrameSettingsSetOption(opts, JXL_ENC_FRAME_SETTING_EFFORT, compression) != JXL_ENC_SUCCESS)
-            RETURN_ERR("Failed in JxlEncoderFrameSettingsSetOption(JXL_ENC_FRAME_SETTING_EFFORT, %d)", compression);
+            RETURN_ERR(LOAD_FAIL, "Failed in JxlEncoderFrameSettingsSetOption(JXL_ENC_FRAME_SETTING_EFFORT, %d)", compression);
 
         DEBUG_PRINTF("Effort = %d", compression);
     }
 
-    const size_t pixels_size = 4 * im->w * im->h;
+    if(JxlEncoderSetBasicInfo(enc, &basic_info) != JXL_ENC_SUCCESS)
+        RETURN_ERR(LOAD_FAIL, "Failed to set encoder parameters with dimensions %d x %d", im->w, im->h);
+
+    /* Switch to codestream level 10 if required */
+    int level;
+    if((level = JxlEncoderGetRequiredCodestreamLevel(enc)) == 10)
+    {
+        if(JxlEncoderSetCodestreamLevel(enc, level) != JXL_ENC_SUCCESS)
+            RETURN_ERR(LOAD_FAIL, "Failed in JxlEncoderSetCodestreamLevel(%d)", level);
+    }
+
+    JxlColorEncoding color;
+    JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
+    if(JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS)
+        RETURN_ERR(LOAD_FAIL, "Failed in JXLEncoderSetColorEncoding");
+
+    const size_t pixels_size = pixel_format.num_channels * im->w * im->h;
 
     // Create a copy of the pixel data with the channels in the correct order
 
     if(!(pixels = malloc(pixels_size)))
-        RETURN_ERR("Failed to allocate 4 * %d * %d = %zu B", im->w, im->h, pixels_size);
+        RETURN_ERR(LOAD_OOM, "Failed to allocate %" PRIu32 " * %" PRIu32 " * %" PRIu32 " = %zu B", pixel_format.num_channels, im->w, im->h, pixels_size);
 
     // Data from imlib2 is 32-bit ARGB, so now have to swap the channels around for libjxl.
-
-    uint8_t *im2_bytes = (uint8_t*)im->data;
-    const bool have_alpha = (im->flags & F_HAS_ALPHA);
-
-    if(IS_BIG_ENDIAN())
+    const uint32_t* impixel = im->data;
+    if(pixel_format.num_channels == 3)
     {
-        // Convert ARGB to RGBA
-        for(size_t i=0; i<pixels_size; i+=4)
+        for(size_t i=0; i<num_pixels; ++i)
         {
-            pixels[i+0] = im2_bytes[i+1];
-            pixels[i+1] = im2_bytes[i+2];
-            pixels[i+2] = im2_bytes[i+3];
-            pixels[i+3] = (have_alpha ? im2_bytes[i+0] : 0xFF);
+            const uint32_t pixel = *(impixel++);
+            pixels[i*3+0] = PIXEL_R(pixel);
+            pixels[i*3+1] = PIXEL_G(pixel);
+            pixels[i*3+2] = PIXEL_B(pixel);
         }
     }
     else
     {
-        // Convert BGRA to RGBA
-        for(size_t i=0; i<pixels_size; i+=4)
+        for(size_t i=0; i<num_pixels; ++i)
         {
-            pixels[i+0] = im2_bytes[i+2];
-            pixels[i+1] = im2_bytes[i+1];
-            pixels[i+2] = im2_bytes[i+0];
-            pixels[i+3] = (have_alpha ? im2_bytes[i+3] : 0xFF);
+            const uint32_t pixel = *(impixel++);
+            pixels[i*4+0] = PIXEL_R(pixel);
+            pixels[i*4+1] = PIXEL_G(pixel);
+            pixels[i*4+2] = PIXEL_B(pixel);
+            pixels[i*4+3] = PIXEL_A(pixel);
         }
     }
 
-    if(progress)
-        progress(im, 1, 0, 0, im->w, im->h);
-
     // Tell encoder to use these pixels
     if(JxlEncoderAddImageFrame(opts, &pixel_format, pixels, pixels_size) != JXL_ENC_SUCCESS)
-        RETURN_ERR("Failed in JxlEncoderAddImageFrame");
+        RETURN_ERR(LOAD_FAIL, "Failed in JxlEncoderAddImageFrame");
 
     // Tell encoder there are no more frames after this one
     JxlEncoderCloseInput(enc);
 
-    // Open output file
-    if(!(out = fopen(im->real_file, "wb")))
-        RETURN_ERR("Failed to open %s for writing; %s", im->real_file, strerror(errno));
+    FILE* const out = im->fi->fp;
 
     // Create buffer for encoded bytes - it doesn't matter if it's too small (within reason)
     size_t jxl_bytes_size = pixels_size / 16;
@@ -810,7 +693,7 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
         jxl_bytes_size = 8*1024;
 
     if(!(jxl_bytes = malloc(jxl_bytes_size)))
-        RETURN_ERR("Failed to allocate %zu B", jxl_bytes_size);
+        RETURN_ERR(LOAD_OOM, "Failed to allocate %zu B", jxl_bytes_size);
 
     JxlEncoderStatus res;
     uint8_t *next_out = jxl_bytes;
@@ -821,35 +704,31 @@ char save(ImlibImage *im, ImlibProgressFunction progress, char progress_granular
         if(res == JXL_ENC_NEED_MORE_OUTPUT)
         {
             if(next_out == jxl_bytes)
-                RETURN_ERR("Encoding stalled");
+                RETURN_ERR(LOAD_FAIL, "Encoding stalled");
 
             // Flush what we've got to clear the output buffer and continue
 
             if(fwrite(jxl_bytes, 1, jxl_bytes_size - avail_out, out) != jxl_bytes_size-avail_out)
-                RETURN_ERR("Failed to write %zu B", jxl_bytes_size - avail_out);
+                RETURN_ERR(LOAD_FAIL, "Failed to write %zu B", jxl_bytes_size - avail_out);
 
             next_out = jxl_bytes;
             avail_out = jxl_bytes_size;
         }
         else
         {
-            RETURN_ERR("Error during encoding");
+            RETURN_ERR(LOAD_FAIL, "Error during encoding");
         }
     }
 
     if(fwrite(jxl_bytes, 1, jxl_bytes_size - avail_out, out) != jxl_bytes_size-avail_out)
-        RETURN_ERR("Failed to write %zu B", jxl_bytes_size - avail_out);
+        RETURN_ERR(LOAD_FAIL, "Failed to write %zu B", jxl_bytes_size - avail_out);
+    
 
-    if(progress)
-        progress(im, 100, 0, 0, im->w, im->h);
-
-    retval = 1;
+    retval = LOAD_SUCCESS;
 
 ret:
     free(pixels);
     free(jxl_bytes);
-    if(out)
-        fclose(out);
     if(enc)
         JxlEncoderDestroy(enc);
     if(runner)
@@ -857,3 +736,5 @@ ret:
     return retval;
 }
 
+
+IMLIB_LOADER(formats, load, save);
