@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 ### Fixed
 - Avoid using global context for lcms2 operations.
+- Update to imlib2's newer loader API.
+- Don't force original profile when saving lossy images.
 ### Added
 - Improved color profile handling.
 
