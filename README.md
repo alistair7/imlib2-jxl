@@ -16,7 +16,6 @@ imlib2 now comes with its own JXL loader, so you might prefer to use that.
 
 On the other hand,
 
- - This loader can write JXL files, while imlib2's can't (at the time of writing).
  - This loader ensures the pixels fed back to the library are using a standard sRGB profile, which gives more consistent results.
    imlib2's loader ignores color profiles.
 
