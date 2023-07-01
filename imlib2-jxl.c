@@ -25,6 +25,16 @@
 // it's available at https://git.enlightenment.org/old/legacy-imlib2/src/branch/master/src/lib/Imlib2_Loader.h
 #include "Imlib2_Loader.h"
 
+#if JPEGXL_NUMERIC_VERSION < JPEGXL_COMPUTE_NUMERIC_VERSION(0,9,0)
+#define IMLIB2_JXL_GET_ENCODED_PROFILE(dec, target, color_encoding) JxlDecoderGetColorAsEncodedProfile((dec), NULL, (target), (color_encoding))
+#define IMLIB2_JXL_GET_ICC_PROFILE_SIZE(dec, target, size) JxlDecoderGetICCProfileSize((dec), NULL, (target), (size))
+#define IMLIB2_JXL_GET_ICC_PROFILE(dec, target, icc_profile, size) JxlDecoderGetColorAsICCProfile((dec), NULL, (target), (icc_profile), (size))
+#else
+#define IMLIB2_JXL_GET_ENCODED_PROFILE JxlDecoderGetColorAsEncodedProfile
+#define IMLIB2_JXL_GET_ICC_PROFILE_SIZE JxlDecoderGetICCProfileSize
+#define IMLIB2_JXL_GET_ICC_PROFILE JxlDecoderGetColorAsICCProfile
+#endif
+
 /**
  * Convenience macro that prints a message to stderr and jumps to the "ret" label.
  */
@@ -34,6 +44,7 @@ do { \
     retval = (rv); \
     goto ret; \
 }while(0)
+
 
 
 /**
@@ -375,7 +386,7 @@ static int load(ImlibImage* im, int load_data)
              * extract an ICC profile and save it for later. */
 
             JxlColorEncoding color_enc;
-            if(JxlDecoderGetColorAsEncodedProfile(dec, &pixel_format, JXL_COLOR_PROFILE_TARGET_DATA, &color_enc) == JXL_DEC_SUCCESS)
+            if(IMLIB2_JXL_GET_ENCODED_PROFILE(dec, JXL_COLOR_PROFILE_TARGET_DATA, &color_enc) == JXL_DEC_SUCCESS)
             {
 
                 if((color_enc.color_space == JXL_COLOR_SPACE_RGB || color_enc.color_space == JXL_COLOR_SPACE_GRAY)
@@ -411,7 +422,7 @@ static int load(ImlibImage* im, int load_data)
                 }
             }
 
-            if(JxlDecoderGetICCProfileSize(dec, &pixel_format, JXL_COLOR_PROFILE_TARGET_DATA, &icc_size) != JXL_DEC_SUCCESS)
+            if(IMLIB2_JXL_GET_ICC_PROFILE_SIZE(dec, JXL_COLOR_PROFILE_TARGET_DATA, &icc_size) != JXL_DEC_SUCCESS)
             {
                 icc_size = 0;
                 break;
@@ -420,7 +431,7 @@ static int load(ImlibImage* im, int load_data)
             if(!(icc_blob = malloc(icc_size)))
                 RETURN_ERR(LOAD_OOM, "Failed to allocate %zu B for ICC profile", icc_size);
 
-            if(JxlDecoderGetColorAsICCProfile(dec, &pixel_format, JXL_COLOR_PROFILE_TARGET_DATA, icc_blob, icc_size) != JXL_DEC_SUCCESS)
+            if(IMLIB2_JXL_GET_ICC_PROFILE(dec, JXL_COLOR_PROFILE_TARGET_DATA, icc_blob, icc_size) != JXL_DEC_SUCCESS)
             {
                 WARN_PRINTF("Failed to read ICC profile");
                 free(icc_blob);
